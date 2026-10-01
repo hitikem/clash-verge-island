@@ -20,6 +20,15 @@
     <PluginTargetDir>$(WinIslandPluginsDir)\clash-verge-island</PluginTargetDir>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <!-- 别把本机绝对路径写进 dll。
+         默认编译会在 PE 的调试目录里记录 PDB 的**绝对路径**（实测 dll 里能看到 D:\ds\...），
+         这个 dll 要公开发到插件市场，等于把自己的目录结构一起发出去。
+         关掉调试目录 + 把源码路径映射成中性前缀，两处都堵上。 -->
+    <DebugType>none</DebugType>
+    <PathMap>$(MSBuildProjectDirectory)=/src</PathMap>
+  </PropertyGroup>
+
   <ItemGroup>
     <!-- 插件 SDK 从 NuGet 装（主次版本 = 宿主 API 版本）。
          ExcludeAssets="runtime"：WinIsland.Core.dll 由宿主提供，不能进插件包 -->

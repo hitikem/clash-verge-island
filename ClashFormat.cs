@@ -41,16 +41,21 @@ internal static class ClashFormat
         _ => Windows.UI.Color.FromArgb(255, 0x5C, 0x6B, 0x7A),
     };
 
-    /// <summary>延迟文字；没有数据时是「--」。</summary>
-    public static string Delay(int ms) => ms >= 0 ? $"{ms} ms" : "--";
+    /// <summary>
+    /// 延迟文字。
+    ///
+    /// 注意：内核在**测速失败/超时**时给的延迟是 `0`，不是"很快"。
+    /// 所以判定有效一律用 `> 0`，否则会把失败显示成「绿灯 0 ms」，比不显示还糟。
+    /// </summary>
+    public static string Delay(int ms) => ms > 0 ? $"{ms} ms" : "--";
 
     /// <summary>只要数字（延迟胶囊里用，和 Clash Verge 的显示一致）。</summary>
-    public static string DelayShort(int ms) => ms >= 0 ? ms.ToString() : "--";
+    public static string DelayShort(int ms) => ms > 0 ? ms.ToString() : "--";
 
-    /// <summary>延迟配色：绿 / 黄 / 红。这两套色在浅色和深色岛体上都读得清。</summary>
+    /// <summary>延迟配色：绿 / 黄 / 红。0 或负数表示没测出来，用灰。</summary>
     public static Windows.UI.Color DelayColor(int ms) => ms switch
     {
-        < 0 => Windows.UI.Color.FromArgb(160, 128, 128, 128),
+        <= 0 => Windows.UI.Color.FromArgb(160, 128, 128, 128),
         < 150 => Windows.UI.Color.FromArgb(255, 0x3F, 0xB9, 0x50),
         < 300 => Windows.UI.Color.FromArgb(255, 0xD2, 0x99, 0x22),
         _ => Windows.UI.Color.FromArgb(255, 0xF8, 0x51, 0x49),

@@ -459,7 +459,7 @@ public sealed class ClashIslandView : UserControl, IMorphView
             text.Text = ClashFormat.DelayShort(site.Delay);
             text.Foreground = site.Delay switch
             {
-                < 0 => _faintBrush,
+                <= 0 => _faintBrush,
                 < 150 => _siteGoodBrush,
                 < 300 => _siteWarnBrush,
                 _ => _siteBadBrush,

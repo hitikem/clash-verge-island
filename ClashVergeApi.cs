@@ -277,7 +277,7 @@ internal sealed class ClashVergeApi : IDisposable
             ? value.GetString() ?? ""
             : "";
 
-    /// <summary>读 element["history"] 里最后一条的 delay；没有就是 -1。</summary>
+    /// <summary>读 element["history"] 里最后一条的 delay；没测出来（0）也算没有，返回 -1。</summary>
     private static int LastDelay(JsonElement element, string historyName)
     {
         if (!element.TryGetProperty(historyName, out var history) ||
@@ -287,7 +287,10 @@ internal sealed class ClashVergeApi : IDisposable
         }
 
         var last = history[history.GetArrayLength() - 1];
-        return last.TryGetProperty("delay", out var delay) && delay.TryGetInt32(out var ms) ? ms : -1;
+        if (!last.TryGetProperty("delay", out var delay) || !delay.TryGetInt32(out var ms)) return -1;
+
+        // 内核在超时/失败时给的是 0；0 不是"很快"，是"没测出来"
+        return ms > 0 ? ms : -1;
     }
 
     /// <summary>读 element["extra"][url]["history"] 里最后一条的 delay。</summary>
@@ -376,7 +379,9 @@ internal sealed class ClashVergeApi : IDisposable
 
         using var doc = await SendAsync(HttpMethod.Get, path, null, ct).ConfigureAwait(false);
 
-        return doc.RootElement.TryGetProperty("delay", out var d) && d.TryGetInt32(out var ms) ? ms : -1;
+        return doc.RootElement.TryGetProperty("delay", out var d) && d.TryGetInt32(out var ms) && ms > 0
+            ? ms
+            : -1;
     }
 
     public void Dispose() => _http.Dispose();

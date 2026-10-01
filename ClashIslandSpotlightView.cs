@@ -54,7 +54,7 @@ public sealed class ClashIslandSpotlightView : UserControl
 
     private SolidColorBrush DelayBrush(int ms) => ms switch
     {
-        < 0 => _delayUnknownBrush,
+        <= 0 => _delayUnknownBrush,
         < 150 => _delayGoodBrush,
         < 300 => _delayWarnBrush,
         _ => _delayBadBrush,

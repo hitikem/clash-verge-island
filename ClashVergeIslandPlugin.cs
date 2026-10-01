@@ -246,10 +246,33 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
 
     // ---- 取数 ----
 
-    private (string Host, int Port, string Secret) ReadConfig() => (
-        Settings.Get("host", "127.0.0.1"),
-        Settings.Get("port", DefaultPort),
-        Settings.Get("secret", ""));
+    /// <summary>
+    /// 连接参数。用户在设置页填了就用他的；**没填的部分自动从 Clash Verge 的配置里读**。
+    ///
+    /// 这样新用户只要在 Clash Verge 里打开「外部控制」，插件这边一个字都不用填就能连上 ——
+    /// 否则要用户把 Core Secret 手抄过来，几乎没人愿意配。
+    /// </summary>
+    private (string Host, int Port, string Secret) ReadConfig()
+    {
+        var host = Settings.Get("host", "");
+        var port = Settings.Get("port", 0);
+        var secret = Settings.Get("secret", "");
+
+        if (Settings.Get("autodetect", true))
+        {
+            var detected = ClashVergeConfig.TryRead();
+            if (detected is not null)
+            {
+                if (string.IsNullOrWhiteSpace(host)) host = detected.Host;
+                if (port <= 0) port = detected.Port;
+                if (string.IsNullOrWhiteSpace(secret)) secret = detected.Secret;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(host)) host = "127.0.0.1";
+        if (port is <= 0 or > 65535) port = DefaultPort;
+        return (host, port, secret);
+    }
 
     /// <summary>手动刷新入口（设置页按钮、聚光卡按钮都用它）。</summary>
     public Task RefreshNowAsync(string reason) => RefreshAsync(reason);
@@ -691,7 +714,8 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         {
             Text = "数据来自 Clash Verge 的本地接口。请先在 Clash Verge 里打开：\n" +
                    "设置 → 「Clash 设置」→ External → 打开「Enable External Controller」，" +
-                   "地址填 127.0.0.1:9097，并设置一个 Core Secret，然后把下面的端口和密码填成一样的。",
+                   "地址填 127.0.0.1:9097，并设置一个 Core Secret。\n" +
+                   "下面的三项**留空即自动从 Clash Verge 读取**（推荐），只有自动读不到时才需要手填。",
             TextWrapping = TextWrapping.Wrap,
             Opacity = 0.75,
             FontSize = 12,
@@ -723,27 +747,31 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
             Child = twChina,
         });
 
+        // 自动检测到的值只作为占位提示；输入框留空就走自动检测
+        var detected = ClashVergeConfig.TryRead();
+        var detectedHint = detected is null ? "（未检测到，请先在 Clash Verge 打开外部控制）" : "（留空则自动使用）";
+
         var hostBox = new TextBox
         {
-            Header = "地址",
-            Text = Settings.Get("host", "127.0.0.1"),
-            PlaceholderText = "127.0.0.1",
+            Header = "地址" + detectedHint,
+            Text = Settings.Get("host", ""),
+            PlaceholderText = detected?.Host ?? "127.0.0.1",
             MinWidth = 260,
         };
 
         var portBox = new TextBox
         {
-            Header = "端口",
-            Text = Settings.Get("port", DefaultPort).ToString(),
-            PlaceholderText = DefaultPort.ToString(),
+            Header = "端口" + detectedHint,
+            Text = Settings.Get("port", 0) > 0 ? Settings.Get("port", 0).ToString() : "",
+            PlaceholderText = (detected?.Port ?? DefaultPort).ToString(),
             MinWidth = 140,
         };
 
         var secretBox = new PasswordBox
         {
-            Header = "Core Secret",
+            Header = "Core Secret" + detectedHint,
             Password = Settings.Get("secret", ""),
-            PlaceholderText = "在 Clash Verge 里设置的那个密码",
+            PlaceholderText = detected is null ? "在 Clash Verge 里设置的那个密码" : "已自动读取",
             MinWidth = 260,
         };
 
@@ -809,14 +837,20 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
             if (_loading) return;
 
             var host = (hostBox.Text ?? "").Trim();
-            if (!string.Equals(host, Settings.Get("host", "127.0.0.1"), StringComparison.Ordinal))
+            if (!string.Equals(host, Settings.Get("host", ""), StringComparison.Ordinal))
             {
-                Settings.Set("host", host.Length == 0 ? "127.0.0.1" : host);
+                // 留空就存空串 —— 表示"走自动检测"，不要硬填 127.0.0.1 把自动检测顶掉
+                Settings.Set("host", host);
             }
 
-            if (int.TryParse((portBox.Text ?? "").Trim(), out var port) && port is > 0 and <= 65535)
+            var portText = (portBox.Text ?? "").Trim();
+            if (portText.Length == 0)
             {
-                if (port != Settings.Get("port", DefaultPort)) Settings.Set("port", port);
+                if (Settings.Get("port", 0) != 0) Settings.Set("port", 0);
+            }
+            else if (int.TryParse(portText, out var port) && port is > 0 and <= 65535)
+            {
+                if (port != Settings.Get("port", 0)) Settings.Set("port", port);
             }
 
             var secret = secretBox.Password ?? "";
