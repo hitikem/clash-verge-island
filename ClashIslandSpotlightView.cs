@@ -352,7 +352,13 @@ public sealed class ClashIslandSpotlightView : UserControl
         RefreshTargetButtons(snapshot);
         _speedUp.Text = $"↑ {ClashFormat.Speed(snapshot.UpPerSec)}";
         _speedDown.Text = $"↓ {ClashFormat.Speed(snapshot.DownPerSec)}";
-        _hint.Text = "点任意节点即可切换；绿色为延迟低，红色为延迟高或不可用。";
+        _hint.Text = "点任意节点即可切换；绿色为延迟低，红色为延迟高或不可用。网站延迟：" +
+                     (_plugin.SiteTestAgeSeconds switch
+                     {
+                         < 0 => "尚未测速",
+                         < 5 => "刚刚更新",
+                         var s => $"{s} 秒前更新",
+                     });
 
         foreach (var button in _modeButtons)
         {

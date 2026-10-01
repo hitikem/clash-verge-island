@@ -53,6 +53,9 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
     /// <summary>上一次"全网站测速"的时间，卡片打开时用它判断数据够不够新。</summary>
     private DateTimeOffset _lastSiteTest = DateTimeOffset.MinValue;
 
+    /// <summary>正在跑全网站测速：防止定时重测和手动点「全部测试」同时开跑。</summary>
+    private bool _siteTestBusy;
+
     /// <summary>
     /// 卡片打开时调用：网站延迟超过 5 分钟没更新就自动测一遍，
     /// 这样点开卡片看到的就是新鲜数据，不用手动点「全部测试」。
@@ -62,8 +65,36 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         if (_stopped || !_snapshot.Connected) return;
         if (DateTimeOffset.UtcNow - _lastSiteTest < TimeSpan.FromMinutes(5)) return;
 
-        _lastSiteTest = DateTimeOffset.UtcNow;
         _ = TestAllSitesAsync();
+    }
+
+    /// <summary>网站延迟自动刷新间隔（秒）；0 = 关闭。</summary>
+    private int SiteRefreshSeconds => Settings.Get("siterefresh", 60);
+
+    /// <summary>距离上次"全网站测速"过去了多少秒；-1 表示还没测过。</summary>
+    public int SiteTestAgeSeconds => _lastSiteTest == DateTimeOffset.MinValue
+        ? -1
+        : (int)(DateTimeOffset.UtcNow - _lastSiteTest).TotalSeconds;
+
+    /// <summary>
+    /// 到点了就重测一遍当前节点对各个网站的延迟 —— 这样卡片和岛上的那四个数字才是"实时"的。
+    /// 必须从 _gate 外面调用（见 OnInitializeAsync 里的说明）。
+    /// </summary>
+    private async Task MaybeRefreshSiteDelaysAsync()
+    {
+        var seconds = SiteRefreshSeconds;
+        if (seconds <= 0 || _stopped || _siteTestBusy || !_snapshot.Connected) return;
+        if (DateTimeOffset.UtcNow - _lastSiteTest < TimeSpan.FromSeconds(seconds)) return;
+
+        _siteTestBusy = true;
+        try
+        {
+            await TestAllSitesAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _siteTestBusy = false;
+        }
     }
 
     private bool _stopped;
@@ -162,9 +193,17 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
 
         _ = RefreshAsync("首次加载");
 
-        // UI 线程定时器；插件停用时宿主自动停掉
-        Context.CreateTimer(TimeSpan.FromSeconds(2), repeat: true, () => _ = RefreshAsync("定时刷新"));
+        // UI 线程定时器；插件停用时宿主自动停掉。
+        // 注意：网站延迟的自动重测要放在 RefreshAsync **外面**——
+        // RefreshAsync 持着 _gate，而重测结束后又要进 RefreshAsync，会自己把自己锁死。
+        Context.CreateTimer(TimeSpan.FromSeconds(2), repeat: true, () => _ = TickAsync());
         return Task.CompletedTask;
+    }
+
+    private async Task TickAsync()
+    {
+        await RefreshAsync("定时刷新").ConfigureAwait(false);
+        await MaybeRefreshSiteDelaysAsync().ConfigureAwait(false);
     }
 
     protected override Task OnShutdownAsync()
@@ -668,6 +707,23 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
             if (Settings.Get("autotest", 0) != minutes) Settings.Set("autotest", minutes);
         };
 
+        // 网站延迟自动刷新：这就是"那四个数字多久更新一次"
+        var siteRefreshBox = new ComboBox { Header = "网站延迟刷新", MinWidth = 180 };
+        siteRefreshBox.Items.Add("关闭");
+        siteRefreshBox.Items.Add("每 30 秒");
+        siteRefreshBox.Items.Add("每 1 分钟");
+        siteRefreshBox.Items.Add("每 2 分钟");
+        siteRefreshBox.Items.Add("每 5 分钟");
+        siteRefreshBox.SelectedIndex = Settings.Get("siterefresh", 60) switch
+        {
+            30 => 1, 60 => 2, 120 => 3, 300 => 4, _ => 0,
+        };
+        siteRefreshBox.SelectionChanged += (_, _) =>
+        {
+            var seconds = siteRefreshBox.SelectedIndex switch { 1 => 30, 2 => 60, 3 => 120, 4 => 300, _ => 0 };
+            if (Settings.Get("siterefresh", 60) != seconds) Settings.Set("siterefresh", seconds);
+        };
+
         var status = new TextBlock { TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = 0.75 };
 
         var _loading = true;   // 页面填充期间不要回写设置（sdk-api §15.1）
@@ -739,7 +795,7 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         panel.Children.Add(new Border
         {
             Style = (Style)Application.Current.Resources["SettingsCardStyle"],
-            Child = new StackPanel { Spacing = 8, Children = { hostBox, portBox, secretBox, targetBox, autoTestBox, actions, status } },
+            Child = new StackPanel { Spacing = 8, Children = { hostBox, portBox, secretBox, targetBox, siteRefreshBox, autoTestBox, actions, status } },
         });
 
         var messageButton = new Button { Content = "发一条测试消息" };
