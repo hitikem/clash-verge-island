@@ -22,8 +22,10 @@ public sealed class ClashIslandSpotlightView : UserControl
     private readonly IIslandTheme _theme;
 
     private readonly TextBlock _status = new() { FontSize = 13 };
-    private readonly TextBlock _modeLine = new() { FontSize = 13 };
-    private readonly TextBlock _speedLine = new() { FontSize = 13 };
+    private readonly TextBlock _speedUp = new() { FontSize = 13 };
+    private readonly TextBlock _speedDown = new() { FontSize = 13 };
+    private readonly SolidColorBrush _upBrush = new(Windows.UI.Color.FromArgb(255, 0xFF, 0xB4, 0x54));
+    private readonly SolidColorBrush _downBrush = new(Windows.UI.Color.FromArgb(255, 0x4C, 0xC2, 0xFF));
     private readonly ComboBox _groupBox = new() { MinWidth = 200 };
     private readonly StackPanel _nodeList = new() { Spacing = 2 };
     private readonly TextBlock _hint = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap };
@@ -115,8 +117,6 @@ public sealed class ClashIslandSpotlightView : UserControl
         };
 
         _status.Foreground = _mutedBrush;
-        _modeLine.Foreground = _mutedBrush;
-        _speedLine.Foreground = _mutedBrush;
         _hint.Foreground = _faintBrush;
 
         // 模式：三个按钮，当前模式高亮（点一下直接切）
@@ -229,14 +229,26 @@ public sealed class ClashIslandSpotlightView : UserControl
 
         var sort = new CheckBox
         {
-            Content = "按延迟排序",
+            Content = "排序",
             IsChecked = _plugin.SortByDelay,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(8, 0, 0, 0),
+            Margin = new Thickness(4, 0, 0, 0),
         };
         sort.Checked += (_, _) => { _plugin.SetSortByDelay(true); _builtSignature = ""; };
         sort.Unchecked += (_, _) => { _plugin.SetSortByDelay(false); _builtSignature = ""; };
         targetRow.Children.Add(sort);
+
+        // 订阅常附带「剩余流量 / 套餐到期」这类信息条目，它们不是能连的节点，默认藏掉
+        var hideInfo = new CheckBox
+        {
+            Content = "隐藏信息",
+            IsChecked = _plugin.HideInfoEntries,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(4, 0, 0, 0),
+        };
+        hideInfo.Checked += (_, _) => { _plugin.SetHideInfoEntries(true); _builtSignature = ""; };
+        hideInfo.Unchecked += (_, _) => { _plugin.SetHideInfoEntries(false); _builtSignature = ""; };
+        targetRow.Children.Add(hideInfo);
 
         var scroller = new ScrollViewer
         {
@@ -246,14 +258,29 @@ public sealed class ClashIslandSpotlightView : UserControl
             Content = _nodeList,
         };
 
-        var titleRow = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 12,
-            VerticalAlignment = VerticalAlignment.Center,
-        };
+        var titleRow = new Grid { VerticalAlignment = VerticalAlignment.Center };
+        titleRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });                        // 国旗
+        titleRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });                        // 标题
+        titleRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });  // 弹簧
+        titleRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });                        // 网速
+        Grid.SetColumn(_headerFlag, 0);
+        Grid.SetColumn(title, 1);
         titleRow.Children.Add(_headerFlag);
         titleRow.Children.Add(title);
+
+        // 实时网速挪到标题行右侧：这样就不用再多占一行（原来的「模式：/分组：/实时网速：」三行全是重复信息）
+        _speedUp.Foreground = _upBrush;
+        _speedDown.Foreground = _downBrush;
+        var speedRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 10,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        speedRow.Children.Add(_speedUp);
+        speedRow.Children.Add(_speedDown);
+        Grid.SetColumn(speedRow, 3);
+        titleRow.Children.Add(speedRow);
 
         var root = new StackPanel
         {
@@ -263,10 +290,10 @@ public sealed class ClashIslandSpotlightView : UserControl
         root.Children.Add(titleRow);
         root.Children.Add(_status);
         root.Children.Add(new Border { Height = 1, Background = _dividerBrush });
-        root.Children.Add(new StackPanel { Spacing = 2, Children = { _modeLine, _speedLine } });
+        // 顺序：先看数据（网站延迟）→ 再动设置（模式 / 分组）→ 最后是节点列表
+        root.Children.Add(targetRow);
         root.Children.Add(modeRow);
         root.Children.Add(groupRow);
-        root.Children.Add(targetRow);
         root.Children.Add(scroller);
         root.Children.Add(_hint);
 
@@ -303,8 +330,9 @@ public sealed class ClashIslandSpotlightView : UserControl
         if (!snapshot.Connected)
         {
             _status.Text = "未连接 Clash Verge";
-            _modeLine.Text = snapshot.Error ?? "";
-            _speedLine.Text = "";
+            _status.Text = snapshot.Error ?? "未连接 Clash Verge";
+            _speedUp.Text = "";
+            _speedDown.Text = "";
             _hint.Text = "打开方法：Clash Verge → 设置 → 「Clash 设置」→ External → " +
                          "打开「Enable External Controller」，地址 127.0.0.1:9097，并设一个 Core Secret，" +
                          "然后把端口和密码填到本插件的设置页。";
@@ -318,13 +346,12 @@ public sealed class ClashIslandSpotlightView : UserControl
             return;
         }
 
-        _status.Text = $"Mihomo {snapshot.Version} · 当前节点 " +
-                       $"{ClashFormat.CleanNodeKeepRegion(snapshot.ActiveNode)} · " +
-                       $"延迟 {ClashFormat.Delay(snapshot.ActiveDelay)}";
+        _status.Text = $"{ClashFormat.CleanNodeKeepRegion(snapshot.ActiveNode)}   ·   " +
+                       $"延迟 {ClashFormat.Delay(snapshot.ActiveDelay)}   ·   Mihomo {snapshot.Version}";
         ApplyHeaderFlag(snapshot.ActiveNode);
         RefreshTargetButtons(snapshot);
-        _modeLine.Text = $"模式：{ClashFormat.Mode(snapshot.Mode)}    分组：{snapshot.ActiveGroup}";
-        _speedLine.Text = $"实时网速：↑ {ClashFormat.Speed(snapshot.UpPerSec)}    ↓ {ClashFormat.Speed(snapshot.DownPerSec)}";
+        _speedUp.Text = $"↑ {ClashFormat.Speed(snapshot.UpPerSec)}";
+        _speedDown.Text = $"↓ {ClashFormat.Speed(snapshot.DownPerSec)}";
         _hint.Text = "点任意节点即可切换；绿色为延迟低，红色为延迟高或不可用。";
 
         foreach (var button in _modeButtons)
@@ -372,9 +399,14 @@ public sealed class ClashIslandSpotlightView : UserControl
         var group = SelectedGroup(snapshot);
         if (group is null) return;
 
+        // 「剩余流量 / 套餐到期」这类订阅信息条目不是能连的节点，默认藏掉，列表才干净
+        var pool = _plugin.HideInfoEntries
+            ? group.Nodes.Where(n => !ClashFormat.IsInfoEntry(n.Name)).ToList()
+            : group.Nodes;
+
         var filtered = string.IsNullOrEmpty(_filter)
-            ? group.Nodes
-            : group.Nodes.Where(n => n.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase)).ToList();
+            ? pool
+            : pool.Where(n => n.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase)).ToList();
 
         // 按延迟从快到慢排（没测过的排最后），让"哪个节点快"一眼可见
         if (_plugin.SortByDelay)
@@ -383,7 +415,8 @@ public sealed class ClashIslandSpotlightView : UserControl
         }
 
         var visible = filtered.Take(MaxNodes).ToList();
-        var signature = group.Name + "#" + _filter + "#" + string.Join(",", visible.Select(n => n.Name));
+        var signature = group.Name + "#" + _filter + "#" + _plugin.HideInfoEntries + "#" +
+                        string.Join(",", visible.Select(n => n.Name));
 
         if (group.Name != _builtGroup || signature != _builtSignature)
         {
@@ -530,12 +563,14 @@ public sealed class ClashIslandSpotlightView : UserControl
             button.Background = selected ? _selectedRowBrush : _rowBrush;
         }
 
-        foreach (var (url, text) in _targetDelays)
+        foreach (var site in snapshot.Sites)
         {
-            if (snapshot.SiteDelays.TryGetValue(url, out var delay))
+            if (!_targetDelays.TryGetValue(site.Url, out var text)) continue;
+
+            if (site.Delay >= 0)
             {
-                text.Text = ClashFormat.DelayShort(delay);
-                text.Foreground = DelayBrush(delay);
+                text.Text = ClashFormat.DelayShort(site.Delay);
+                text.Foreground = DelayBrush(site.Delay);
             }
             else
             {
@@ -641,7 +676,25 @@ public sealed class ClashIslandSpotlightView : UserControl
             };
         }
 
-        return new Border { Width = width, Height = height, Margin = margin };
+        // 认不出地区（DIRECT / REJECT / 订阅信息条目…）：给一个兜底字形，
+        // 不留空白 —— 空着看着像图标没加载出来
+        return new Border
+        {
+            Width = width,
+            Height = height,
+            CornerRadius = new CornerRadius(3),
+            Background = _rowBrush,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = margin,
+            Child = new FontIcon
+            {
+                Glyph = ClashFormat.FallbackGlyph(nodeName),
+                FontSize = 10,
+                Foreground = _faintBrush,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+            },
+        };
     }
 
     private void ApplyThemeColors()

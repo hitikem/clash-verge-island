@@ -74,6 +74,52 @@ internal static class ClashFormat
         return head.Length <= 14 ? head : head[..14] + "…";
     }
 
+    /// <summary>
+    /// 认不出地区时的兜底图标。
+    ///
+    /// 节点列表里有一批"不是真节点"的条目（DIRECT / REJECT / 剩余流量 / 套餐到期…），
+    /// 它们没有国旗。如果什么都不画，左边就是一排空白，看着像图标没加载出来。
+    /// 这里按含义给一个字形，保证图标这一列永远是满的。
+    /// </summary>
+    public static string FallbackGlyph(string nodeName)
+    {
+        if (string.IsNullOrEmpty(nodeName)) return "\uE774";
+        if (nodeName.Equals("DIRECT", StringComparison.OrdinalIgnoreCase)) return "\uE72A";   // 直连箭头
+        if (nodeName.StartsWith("REJECT", StringComparison.OrdinalIgnoreCase)) return "\uE711"; // 禁止
+
+        // 订阅附带的信息条目（流量、到期、重置…）
+        if (nodeName.Contains("流量", StringComparison.Ordinal) ||
+            nodeName.Contains("到期", StringComparison.Ordinal) ||
+            nodeName.Contains("重置", StringComparison.Ordinal) ||
+            nodeName.Contains("官网", StringComparison.Ordinal) ||
+            nodeName.Contains("订阅", StringComparison.Ordinal) ||
+            nodeName.Contains("套餐", StringComparison.Ordinal) ||
+            nodeName.Contains("剩余", StringComparison.Ordinal))
+        {
+            return "\uE946";   // 信息
+        }
+
+        return "\uE968";       // 普通节点：服务器
+    }
+
+    /// <summary>
+    /// 是不是订阅附带的信息条目（不是能连的节点）。
+    /// 这类条目混在节点列表里既没用又碍眼，默认把它们藏掉。
+    /// </summary>
+    public static bool IsInfoEntry(string nodeName)
+    {
+        if (string.IsNullOrEmpty(nodeName)) return false;
+
+        return nodeName.Contains("剩余流量", StringComparison.Ordinal) ||
+               nodeName.Contains("距离下次重置", StringComparison.Ordinal) ||
+               nodeName.Contains("套餐到期", StringComparison.Ordinal) ||
+               nodeName.Contains("到期时间", StringComparison.Ordinal) ||
+               nodeName.Contains("剩余", StringComparison.Ordinal) ||
+               nodeName.Contains("重置", StringComparison.Ordinal) ||
+               nodeName.Contains("官网", StringComparison.Ordinal) ||
+               nodeName.Contains("订阅", StringComparison.Ordinal);
+    }
+
     /// <summary>节点的完整名字，只去掉渲染不出来的国旗（展开态用）。</summary>
     public static string CleanNode(string name) =>
         string.IsNullOrEmpty(name) ? "" : StripFlags(name).Trim();

@@ -38,6 +38,9 @@ public sealed record ClashTraffic(long Up, long Down, int Connections);
 /// <summary>/configs 里我们关心的那几项。</summary>
 public sealed record ClashConfig(string Mode, bool TunEnabled, int MixedPort);
 
+/// <summary>当前节点对某个测速网站的延迟。</summary>
+public sealed record ClashSiteLatency(string Name, string Url, int Delay);
+
 /// <summary>一次刷新拿到的全部状态。</summary>
 public sealed class ClashSnapshot
 {
@@ -69,8 +72,8 @@ public sealed class ClashSnapshot
     /// <summary>当前活动连接数。</summary>
     public int Connections { get; set; }
 
-    /// <summary>当前节点对各个测速网站的延迟（键是网站 URL）——卡片里实时显示用。</summary>
-    public Dictionary<string, int> SiteDelays { get; set; } = new(StringComparer.Ordinal);
+    /// <summary>当前节点对各个测速网站的延迟（岛上和卡片里都显示它）。</summary>
+    public List<ClashSiteLatency> Sites { get; set; } = new();
 
     /// <summary>本次运行累计上传 / 下载字节数。</summary>
     public long UpTotal { get; set; }

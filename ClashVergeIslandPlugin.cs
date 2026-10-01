@@ -50,6 +50,22 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
     /// <summary>上一次自动测速的时间（"自动测速"关掉时用不到）。</summary>
     private DateTimeOffset _lastAutoTest = DateTimeOffset.MinValue;
 
+    /// <summary>上一次"全网站测速"的时间，卡片打开时用它判断数据够不够新。</summary>
+    private DateTimeOffset _lastSiteTest = DateTimeOffset.MinValue;
+
+    /// <summary>
+    /// 卡片打开时调用：网站延迟超过 5 分钟没更新就自动测一遍，
+    /// 这样点开卡片看到的就是新鲜数据，不用手动点「全部测试」。
+    /// </summary>
+    public void EnsureFreshSiteDelays()
+    {
+        if (_stopped || !_snapshot.Connected) return;
+        if (DateTimeOffset.UtcNow - _lastSiteTest < TimeSpan.FromMinutes(5)) return;
+
+        _lastSiteTest = DateTimeOffset.UtcNow;
+        _ = TestAllSitesAsync();
+    }
+
     private bool _stopped;
 
     /// <summary>聚光卡当前选中的分组（用户手动选过就记住）。</summary>
@@ -63,6 +79,15 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
     {
         if (Settings.Get("sort", false) == value) return;
         Settings.Set("sort", value);
+    }
+
+    /// <summary>节点列表要不要藏掉订阅附带的信息条目（剩余流量 / 套餐到期…）。默认藏。</summary>
+    public bool HideInfoEntries => Settings.Get("hideinfo", true);
+
+    public void SetHideInfoEntries(bool value)
+    {
+        if (Settings.Get("hideinfo", true) == value) return;
+        Settings.Set("hideinfo", value);
     }
 
     // ---- 测速网站（和 Clash Verge 界面上那套一致：Apple / GitHub / Google / YouTube）----
@@ -279,7 +304,11 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
                     .GetNodeSiteDelaysAsync(snapshot.ActiveNode, _targets.Select(t => t.Url).ToList(), ct)
                     .ConfigureAwait(false);
             }
-            snapshot.SiteDelays = _siteDelays;
+
+            // 摊平成「网站名 + 延迟」，视图直接照着画（靶子顺序跟 Clash Verge 里一致）
+            snapshot.Sites = _targets
+                .Select(t => new ClashSiteLatency(t.Name, t.Url, _siteDelays.TryGetValue(t.Url, out var d) ? d : -1))
+                .ToList();
 
             snapshot.Connected = true;
 
@@ -336,6 +365,7 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
 
         try
         {
+            _lastSiteTest = DateTimeOffset.UtcNow;
             Log.Info($"开始全网站测速：{node}");
             Context.RunOnUI(() => Context.Island.ShowMessage(new IslandMessage
             {
@@ -425,12 +455,15 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         Context.Island.OpenSpotlight(new IslandSpotlight
         {
             Content = _spotlight,
-            Size = new Windows.Foundation.Size(780, 620),
+            Size = new Windows.Foundation.Size(830, 620),
             OnClosed = () => _spotlight?.OnHostClosed(),
         });
 
         // 打开瞬间先铺一次已有数据，别让卡片空着
         _spotlight.Apply(_snapshot);
+
+        // 数据太旧就自动测一遍（5 分钟内测过就跳过）
+        EnsureFreshSiteDelays();
     }
 
     public void SetSpotlightGroup(string group)

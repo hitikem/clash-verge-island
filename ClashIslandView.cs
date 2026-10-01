@@ -30,7 +30,7 @@ public sealed class ClashIslandView : UserControl, IMorphView
     private const double ExpandedBadgeSize = 12;
     private const double CompactTitleSize = 13;
     private const double ExpandedTitleSize = 15;
-    private const double ExpandedDetailHeight = 74;
+    private const double ExpandedDetailHeight = 96;
 
     /// <summary>
     /// 标题和延迟都给一个宽度上限。
@@ -112,6 +112,20 @@ public sealed class ClashIslandView : UserControl, IMorphView
     /// <summary>展开态第三行：连接数 · 累计流量 · TUN 状态。</summary>
     private readonly TextBlock _sub;
     private readonly StackPanel _root;
+
+    /// <summary>展开态第四行：当前节点对各个测速网站的延迟（Apple 87 · GitHub 127 …）。</summary>
+    private readonly StackPanel _siteRow = new()
+    {
+        Orientation = Orientation.Horizontal,
+        VerticalAlignment = VerticalAlignment.Center,
+    };
+
+    private readonly Dictionary<string, TextBlock> _siteTexts = new(StringComparer.Ordinal);
+    private string _siteSignature = "\u0000";
+
+    private readonly SolidColorBrush _siteGoodBrush = new(Windows.UI.Color.FromArgb(255, 0x3F, 0xB9, 0x50));
+    private readonly SolidColorBrush _siteWarnBrush = new(Windows.UI.Color.FromArgb(255, 0xD2, 0x99, 0x22));
+    private readonly SolidColorBrush _siteBadBrush = new(Windows.UI.Color.FromArgb(255, 0xF8, 0x51, 0x49));
 
     /// <summary>中性色一律用共享画刷：主题一变只改 Color，用到的地方当场跟着变。</summary>
     private readonly SolidColorBrush _textBrush = new();
@@ -299,6 +313,7 @@ public sealed class ClashIslandView : UserControl, IMorphView
         _detail.Children.Add(speedRow);
         _detail.Children.Add(_sparkCanvas);
         _detail.Children.Add(_sub);
+        _detail.Children.Add(_siteRow);
 
         _root = new StackPanel
         {
@@ -378,12 +393,78 @@ public sealed class ClashIslandView : UserControl, IMorphView
         _speedDown.Text = $"↓ {ClashFormat.Speed(snapshot.DownPerSec)}";
 
         UpdateSparkline(snapshot.DownHistory, snapshot.UpHistory);
+        UpdateSites(snapshot.Sites);
 
         // 第三行：分组 · 连接数 · 累计流量 · TUN 状态
         var tun = snapshot.TunEnabled ? "TUN 开" : "TUN 关";
         var group = string.IsNullOrEmpty(snapshot.ActiveGroup) ? "—" : snapshot.ActiveGroup;
         _sub.Text = $"{group} · {snapshot.Connections} 连接 · " +
                     $"↑{ClashFormat.Bytes(snapshot.UpTotal)} ↓{ClashFormat.Bytes(snapshot.DownTotal)} · {tun}";
+    }
+
+    /// <summary>
+    /// 展开态最后一行：当前节点对每个测速网站的延迟。
+    /// 网站列表是从 Clash Verge 的配置读来的，所以这里按名字动态建行，只在网站集合变化时重建。
+    /// </summary>
+    private void UpdateSites(List<ClashSiteLatency> sites)
+    {
+        var signature = string.Join(",", sites.Select(s => s.Name));
+        if (signature != _siteSignature)
+        {
+            _siteSignature = signature;
+            _siteTexts.Clear();
+            _siteRow.Children.Clear();
+
+            for (var i = 0; i < sites.Count; i++)
+            {
+                if (i > 0)
+                {
+                    _siteRow.Children.Add(new TextBlock
+                    {
+                        Text = "·",
+                        FontSize = 11,
+                        Margin = new Thickness(7, 0, 7, 0),
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Foreground = _faintBrush,
+                    });
+                }
+
+                _siteRow.Children.Add(new TextBlock
+                {
+                    Text = sites[i].Name,
+                    FontSize = 11,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Foreground = _faintBrush,
+                });
+
+                var delay = new TextBlock
+                {
+                    Text = "--",
+                    FontSize = 11,
+                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                    Margin = new Thickness(4, 0, 0, 0),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Foreground = _faintBrush,
+                };
+
+                _siteRow.Children.Add(delay);
+                _siteTexts[sites[i].Url] = delay;
+            }
+        }
+
+        foreach (var site in sites)
+        {
+            if (!_siteTexts.TryGetValue(site.Url, out var text)) continue;
+
+            text.Text = ClashFormat.DelayShort(site.Delay);
+            text.Foreground = site.Delay switch
+            {
+                < 0 => _faintBrush,
+                < 150 => _siteGoodBrush,
+                < 300 => _siteWarnBrush,
+                _ => _siteBadBrush,
+            };
+        }
     }
 
     /// <summary>
