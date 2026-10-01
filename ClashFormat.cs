@@ -22,6 +22,25 @@ internal static class ClashFormat
         return $"{bytesPerSecond / (1024 * 1024):0.00} MB/s";
     }
 
+    /// <summary>把累计字节数格式化成 MB、GB（不带 /s）。</summary>
+    public static string Bytes(long bytes)
+    {
+        if (bytes < 0) return "--";
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024L * 1024) return $"{bytes / 1024.0:0.0} KB";
+        if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024):0.0} MB";
+        return $"{bytes / (1024.0 * 1024 * 1024):0.00} GB";
+    }
+
+    /// <summary>模式胶囊的底色：三种模式用三种颜色，一眼能分辨。</summary>
+    public static Windows.UI.Color ModeColor(string mode) => mode switch
+    {
+        "rule" => Windows.UI.Color.FromArgb(255, 0x3B, 0x82, 0xF6),     // 蓝
+        "global" => Windows.UI.Color.FromArgb(255, 0x8B, 0x5C, 0xF6),   // 紫
+        "direct" => Windows.UI.Color.FromArgb(255, 0x10, 0xB9, 0x81),   // 绿
+        _ => Windows.UI.Color.FromArgb(255, 0x5C, 0x6B, 0x7A),
+    };
+
     /// <summary>延迟文字；没有数据时是「--」。</summary>
     public static string Delay(int ms) => ms >= 0 ? $"{ms} ms" : "--";
 
@@ -57,6 +76,31 @@ internal static class ClashFormat
         string.IsNullOrEmpty(name) ? "" : StripFlags(name).Trim();
 
     /// <summary>
+    /// 保留地区名、但去掉多余地区代码的显示名（聚光卡头部用）。
+    /// 「🇸🇬sg新加坡高速05|BGP」→「新加坡高速05|BGP」
+    /// </summary>
+    public static string CleanNodeKeepRegion(string name)
+    {
+        var cleaned = CleanNode(name);
+        var code = DetectRegionCode(name);
+        if (string.IsNullOrEmpty(code)) return cleaned;
+
+        return StripCodeToken(cleaned, code).Trim();
+    }
+
+    /// <summary>
+    /// 删掉独立的地区代码（如 "sg"、"hk"）。
+    /// 只删前后都不是字母数字的那些，避免把正常单词里的字母组合误伤掉。
+    /// </summary>
+    private static string StripCodeToken(string text, string code) =>
+        string.IsNullOrEmpty(code)
+            ? text
+            : System.Text.RegularExpressions.Regex.Replace(
+                text,
+                $@"(?i)(?<![a-z0-9]){System.Text.RegularExpressions.Regex.Escape(code)}(?![a-z0-9])",
+                "");
+
+    /// <summary>
     /// 把名字里的地区词去掉。
     ///
     /// 岛上已经显示了国旗，「🇸🇬新加坡高速05」里的「新加坡」就是重复信息，
@@ -74,6 +118,7 @@ internal static class ClashFormat
             result = result.Replace(alias, "", StringComparison.OrdinalIgnoreCase);
         }
 
+        result = StripCodeToken(result, code);
         result = result.Trim(' ', '-', '_', '|', '·', '.', '(', ')', '[', ']', '、');
         while (result.Contains("  ", StringComparison.Ordinal)) result = result.Replace("  ", " ");
         while (result.Contains("--", StringComparison.Ordinal)) result = result.Replace("--", "-");

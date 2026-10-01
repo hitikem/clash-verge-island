@@ -60,6 +60,19 @@ public sealed class ClashIslandSpotlightView : UserControl
 
     private readonly FlagLibrary _flags;
     private readonly TextBox _search = new() { PlaceholderText = "搜索节点…", MinWidth = 180 };
+
+    /// <summary>卡片左上角的大国旗，跟着当前节点变。</summary>
+    private readonly Border _headerFlag = new()
+    {
+        Width = 28,
+        Height = 19,
+        CornerRadius = new CornerRadius(3),
+        BorderThickness = new Thickness(1),
+        VerticalAlignment = VerticalAlignment.Center,
+        Opacity = 0,
+    };
+
+    private string _headerFlagCode = "\u0000";
     private string _filter = "";
 
     private string _builtGroup = "";
@@ -149,16 +162,25 @@ public sealed class ClashIslandSpotlightView : UserControl
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            MaxHeight = 300,
+            MaxHeight = 240,
             Content = _nodeList,
         };
+
+        var titleRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 12,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        titleRow.Children.Add(_headerFlag);
+        titleRow.Children.Add(title);
 
         var root = new StackPanel
         {
             Spacing = 12,
             Padding = new Thickness(32, 28, 32, 28),
         };
-        root.Children.Add(title);
+        root.Children.Add(titleRow);
         root.Children.Add(_status);
         root.Children.Add(new Border { Height = 1, Background = _dividerBrush });
         root.Children.Add(new StackPanel { Spacing = 2, Children = { _modeLine, _speedLine } });
@@ -213,7 +235,10 @@ public sealed class ClashIslandSpotlightView : UserControl
             return;
         }
 
-        _status.Text = $"Mihomo {snapshot.Version} · 当前节点 {snapshot.ActiveNode} · 延迟 {ClashFormat.Delay(snapshot.ActiveDelay)}";
+        _status.Text = $"Mihomo {snapshot.Version} · 当前节点 " +
+                       $"{ClashFormat.CleanNodeKeepRegion(snapshot.ActiveNode)} · " +
+                       $"延迟 {ClashFormat.Delay(snapshot.ActiveDelay)}";
+        ApplyHeaderFlag(snapshot.ActiveNode);
         _modeLine.Text = $"模式：{ClashFormat.Mode(snapshot.Mode)}    分组：{snapshot.ActiveGroup}";
         _speedLine.Text = $"实时网速：↑ {ClashFormat.Speed(snapshot.UpPerSec)}    ↓ {ClashFormat.Speed(snapshot.DownPerSec)}";
         _hint.Text = "点任意节点即可切换；绿色为延迟低，红色为延迟高或不可用。";
@@ -337,7 +362,7 @@ public sealed class ClashIslandSpotlightView : UserControl
         var name = new TextBlock
         {
             // 显示时去掉国旗文字：Windows 渲染不出国旗，只会变成「JP」两个字母看着像乱码
-            Text = ClashFormat.CleanNode(node.Name),
+            Text = ClashFormat.CleanNodeKeepRegion(node.Name),
             FontSize = 13,
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
@@ -383,6 +408,45 @@ public sealed class ClashIslandSpotlightView : UserControl
         _rowButtons[node.Name] = button;
         _rowTitles[node.Name] = name;
         return button;
+    }
+
+    /// <summary>卡片左上角的大国旗。只在地区真的变了才重建，别每 2 秒造一堆控件。</summary>
+    private void ApplyHeaderFlag(string nodeName)
+    {
+        var code = ClashFormat.DetectRegionCode(nodeName) ?? "";
+        if (string.Equals(code, _headerFlagCode, StringComparison.Ordinal)) return;
+        _headerFlagCode = code;
+
+        _headerFlag.BorderBrush = _flagEdgeBrush;
+
+        if (string.IsNullOrEmpty(code))
+        {
+            _headerFlag.Opacity = 0;
+            _headerFlag.Child = null;
+            return;
+        }
+
+        var flag = _flags.Get(code);
+        if (flag is not null)
+        {
+            _headerFlag.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 255, 255, 255));
+            _headerFlag.Child = new Image { Source = flag, Stretch = Stretch.Uniform };
+        }
+        else
+        {
+            _headerFlag.Background = new SolidColorBrush(ClashFormat.RegionColor(code));
+            _headerFlag.Child = new TextBlock
+            {
+                Text = code,
+                FontSize = 12,
+                FontWeight = Microsoft.UI.Text.FontWeights.Bold,
+                Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 255, 255, 255)),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+        }
+
+        _headerFlag.Opacity = 1;
     }
 
     /// <summary>

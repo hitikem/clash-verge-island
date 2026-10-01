@@ -171,17 +171,25 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         try
         {
             snapshot.Version = await _api.GetVersionAsync(ct).ConfigureAwait(false);
-            snapshot.Mode = await _api.GetModeAsync(ct).ConfigureAwait(false);
 
-            var (up, down) = await _api.GetTotalsAsync(ct).ConfigureAwait(false);
+            var config = await _api.GetConfigAsync(ct).ConfigureAwait(false);
+            snapshot.Mode = config.Mode;
+            snapshot.TunEnabled = config.TunEnabled;
+            snapshot.MixedPort = config.MixedPort;
+
+            var traffic = await _api.GetTrafficAsync(ct).ConfigureAwait(false);
+            snapshot.Connections = traffic.Connections;
+            snapshot.UpTotal = traffic.Up;
+            snapshot.DownTotal = traffic.Down;
+
             var now = DateTimeOffset.UtcNow;
             if (_lastUp >= 0 && _lastTrafficAt != default)
             {
                 var seconds = (now - _lastTrafficAt).TotalSeconds;
                 if (seconds > 0.2)
                 {
-                    var upRaw = Math.Max(0, (up - _lastUp) / seconds);
-                    var downRaw = Math.Max(0, (down - _lastDown) / seconds);
+                    var upRaw = Math.Max(0, (traffic.Up - _lastUp) / seconds);
+                    var downRaw = Math.Max(0, (traffic.Down - _lastDown) / seconds);
 
                     // 指数平滑：原始值是每 2 秒一次的瞬时差值，直接显示会疯狂跳动，
                     // 数字根本看不清。平滑一半一半，既跟得上又读得清。
@@ -197,8 +205,8 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
                     while (_downHistory.Count > HistoryLength) _downHistory.Dequeue();
                 }
             }
-            _lastUp = up;
-            _lastDown = down;
+            _lastUp = traffic.Up;
+            _lastDown = traffic.Down;
             _lastTrafficAt = now;
 
             snapshot.UpHistory = _upHistory.ToArray();
@@ -283,7 +291,7 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         Context.Island.OpenSpotlight(new IslandSpotlight
         {
             Content = _spotlight,
-            Size = new Windows.Foundation.Size(760, 560),
+            Size = new Windows.Foundation.Size(780, 620),
             OnClosed = () => _spotlight?.OnHostClosed(),
         });
 

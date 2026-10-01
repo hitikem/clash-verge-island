@@ -3,6 +3,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
+using Microsoft.UI.Xaml.Shapes;
 using WinIsland.Core;
 
 namespace ClashVergeIsland;
@@ -28,7 +29,7 @@ public sealed class ClashIslandView : UserControl, IMorphView
     private const double ExpandedBadgeSize = 12;
     private const double CompactTitleSize = 13;
     private const double ExpandedTitleSize = 15;
-    private const double ExpandedDetailHeight = 50;
+    private const double ExpandedDetailHeight = 74;
 
     /// <summary>
     /// 标题和延迟都给一个宽度上限。
@@ -76,7 +77,24 @@ public sealed class ClashIslandView : UserControl, IMorphView
     private readonly Border _delayChip;
     private readonly SolidColorBrush _delayChipBrush = new();
     private readonly StackPanel _detail;
-    private readonly TextBlock _modeSpeed;
+
+    /// <summary>展开态第一行：模式胶囊 + 彩色上下行速度。</summary>
+    private readonly Border _modeChip;
+    private readonly TextBlock _modeText;
+    private readonly SolidColorBrush _modeChipBrush = new();
+    private readonly TextBlock _speedUp;
+    private readonly TextBlock _speedDown;
+    private readonly SolidColorBrush _upBrush = new();
+    private readonly SolidColorBrush _downBrush = new();
+
+    /// <summary>展开态第二行：最近 60 次采样的网速曲线。</summary>
+    private readonly Canvas _sparkCanvas;
+    private readonly Polyline _downLine;
+    private readonly Polyline _upLine;
+    private readonly SolidColorBrush _downLineBrush = new();
+    private readonly SolidColorBrush _upLineBrush = new();
+
+    /// <summary>展开态第三行：连接数 · 累计流量 · TUN 状态。</summary>
     private readonly TextBlock _sub;
     private readonly StackPanel _root;
 
@@ -208,17 +226,74 @@ public sealed class ClashIslandView : UserControl, IMorphView
         header.Children.Add(_title);
         header.Children.Add(_delayChip);
 
-        _modeSpeed = new TextBlock { FontSize = 13, Foreground = _mutedBrush };
+        // ---- 展开态的内容：三行，全部常驻可视树，靠 Height/Opacity 收起 ----
+
+        // 第一行：模式胶囊 + 上下行速度
+        _modeText = new TextBlock
+        {
+            Text = "规则",
+            FontSize = 11,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 255, 255, 255)),
+        };
+        _modeChip = new Border
+        {
+            Background = _modeChipBrush,
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(7, 1, 7, 1),
+            VerticalAlignment = VerticalAlignment.Center,
+            Child = _modeText,
+        };
+
+        _upBrush.Color = Windows.UI.Color.FromArgb(255, 0xFF, 0xB4, 0x54);
+        _downBrush.Color = Windows.UI.Color.FromArgb(255, 0x4C, 0xC2, 0xFF);
+        _speedUp = new TextBlock
+        {
+            Text = "↑ --",
+            FontSize = 12,
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = _upBrush,
+        };
+        _speedDown = new TextBlock
+        {
+            Text = "↓ --",
+            FontSize = 12,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(10, 0, 0, 0),
+            Foreground = _downBrush,
+        };
+
+        var speedRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        speedRow.Children.Add(_modeChip);
+        speedRow.Children.Add(_speedUp);
+        speedRow.Children.Add(_speedDown);
+
+        // 第二行：网速曲线（最近 60 次采样）
+        _downLineBrush.Color = Windows.UI.Color.FromArgb(210, 0x4C, 0xC2, 0xFF);
+        _upLineBrush.Color = Windows.UI.Color.FromArgb(170, 0xFF, 0xB4, 0x54);
+        _downLine = new Polyline { Stroke = _downLineBrush, StrokeThickness = 1.6, StrokeLineJoin = PenLineJoin.Round };
+        _upLine = new Polyline { Stroke = _upLineBrush, StrokeThickness = 1.2, StrokeLineJoin = PenLineJoin.Round };
+        _sparkCanvas = new Canvas { Height = 26, Width = ExpandedContentWidth - 20 };
+        _sparkCanvas.Children.Add(_upLine);
+        _sparkCanvas.Children.Add(_downLine);
+
+        // 第三行：连接数 · 累计流量 · TUN
         _sub = new TextBlock
         {
             FontSize = 12,
             TextTrimming = TextTrimming.CharacterEllipsis,
-            Foreground = _faintBrush,
+            Foreground = _mutedBrush,
         };
 
-        // 展开态才显示的内容：Height/Opacity 归零藏起来（元素仍常驻可视树）
-        _detail = new StackPanel { Height = 0, Opacity = 0, Spacing = 4 };
-        _detail.Children.Add(_modeSpeed);
+        _detail = new StackPanel { Height = 0, Opacity = 0, Spacing = 6 };
+        _detail.Children.Add(speedRow);
+        _detail.Children.Add(_sparkCanvas);
         _detail.Children.Add(_sub);
 
         _root = new StackPanel
@@ -256,7 +331,14 @@ public sealed class ClashIslandView : UserControl, IMorphView
             _shortName = "Clash 未连接";
             _delay.Text = "";
             _delayChipBrush.Color = Windows.UI.Color.FromArgb(0, 0, 0, 0);
-            _modeSpeed.Text = snapshot.Error ?? "等待连接…";
+
+            _modeText.Text = "--";
+            _modeChipBrush.Color = ClashFormat.ModeColor("");
+            _speedUp.Text = "";
+            _speedDown.Text = "";
+            _downLine.Points.Clear();
+            _upLine.Points.Clear();
+
             _sub.Text = "请先在 Clash Verge 打开「外部控制」";
             UpdateTitleText();
             ApplyRegion(null);               // 连不上就用地球图标
@@ -285,12 +367,54 @@ public sealed class ClashIslandView : UserControl, IMorphView
         _delayBrush.Color = delayColor;
         _delayChipBrush.Color = Windows.UI.Color.FromArgb(46, delayColor.R, delayColor.G, delayColor.B);
 
-        _modeSpeed.Text = $"模式：{ClashFormat.Mode(snapshot.Mode)}    " +
-                          $"↑ {ClashFormat.Speed(snapshot.UpPerSec)}    ↓ {ClashFormat.Speed(snapshot.DownPerSec)}";
+        // 模式胶囊 + 彩色上下行
+        _modeText.Text = ClashFormat.Mode(snapshot.Mode);
+        _modeChipBrush.Color = ClashFormat.ModeColor(snapshot.Mode);
+        _speedUp.Text = $"↑ {ClashFormat.Speed(snapshot.UpPerSec)}";
+        _speedDown.Text = $"↓ {ClashFormat.Speed(snapshot.DownPerSec)}";
 
-        _sub.Text = string.IsNullOrEmpty(snapshot.ActiveGroup)
-            ? $"Mihomo {snapshot.Version}"
-            : $"分组：{snapshot.ActiveGroup} · Mihomo {snapshot.Version}";
+        UpdateSparkline(snapshot.DownHistory, snapshot.UpHistory);
+
+        // 第三行：分组 · 连接数 · 累计流量 · TUN 状态
+        var tun = snapshot.TunEnabled ? "TUN 开" : "TUN 关";
+        var group = string.IsNullOrEmpty(snapshot.ActiveGroup) ? "—" : snapshot.ActiveGroup;
+        _sub.Text = $"{group} · {snapshot.Connections} 连接 · " +
+                    $"↑{ClashFormat.Bytes(snapshot.UpTotal)} ↓{ClashFormat.Bytes(snapshot.DownTotal)} · {tun}";
+    }
+
+    /// <summary>
+    /// 把最近若干次采样的网速画成曲线。
+    /// 上下行共用一个纵向标尺，否则两条线各自归一化会看不出谁大谁小。
+    /// </summary>
+    private void UpdateSparkline(double[] down, double[] up)
+    {
+        _downLine.Points.Clear();
+        _upLine.Points.Clear();
+
+        if (down.Length < 2 && up.Length < 2) return;
+
+        var width = _sparkCanvas.Width;
+        var height = _sparkCanvas.Height;
+
+        var max = 1d;
+        foreach (var v in down) if (v > max) max = v;
+        foreach (var v in up) if (v > max) max = v;
+
+        Fill(_downLine, down, width, height, max);
+        Fill(_upLine, up, width, height, max);
+    }
+
+    private static void Fill(Polyline line, double[] values, double width, double height, double max)
+    {
+        if (values.Length < 2) return;
+
+        var step = width / (values.Length - 1);
+        for (var i = 0; i < values.Length; i++)
+        {
+            var x = i * step;
+            var y = height - Math.Clamp(values[i] / max, 0, 1) * height;
+            line.Points.Add(new Windows.Foundation.Point(x, y));
+        }
     }
 
     /// <summary>小岛显示精简名，展开后切成全名。</summary>

@@ -32,6 +32,12 @@ public sealed class ClashGroup
     public List<ClashNode> Nodes { get; } = new();
 }
 
+/// <summary>内核的流量计数（累计字节数 + 当前活动连接数）。</summary>
+public sealed record ClashTraffic(long Up, long Down, int Connections);
+
+/// <summary>/configs 里我们关心的那几项。</summary>
+public sealed record ClashConfig(string Mode, bool TunEnabled, int MixedPort);
+
 /// <summary>一次刷新拿到的全部状态。</summary>
 public sealed class ClashSnapshot
 {
@@ -59,6 +65,19 @@ public sealed class ClashSnapshot
     /// <summary>最近若干次采样的上下行速度（字节/秒），聚光卡拿来画趋势曲线。</summary>
     public double[] DownHistory { get; set; } = Array.Empty<double>();
     public double[] UpHistory { get; set; } = Array.Empty<double>();
+
+    /// <summary>当前活动连接数。</summary>
+    public int Connections { get; set; }
+
+    /// <summary>本次运行累计上传 / 下载字节数。</summary>
+    public long UpTotal { get; set; }
+    public long DownTotal { get; set; }
+
+    /// <summary>TUN 模式是否开启。</summary>
+    public bool TunEnabled { get; set; }
+
+    /// <summary>混合代理端口。</summary>
+    public int MixedPort { get; set; }
 }
 
 /// <summary>接口返回了非 2xx 时抛出（带状态码，方便翻译成人话）。</summary>
@@ -131,21 +150,38 @@ internal sealed class ClashVergeApi : IDisposable
         return doc.RootElement.TryGetProperty("version", out var v) ? v.GetString() ?? "" : "";
     }
 
-    /// <summary>GET /configs → 当前模式（rule / global / direct）。</summary>
-    public async Task<string> GetModeAsync(CancellationToken ct)
+    /// <summary>GET /configs → 当前模式、TUN 开关、混合端口。</summary>
+    public async Task<ClashConfig> GetConfigAsync(CancellationToken ct)
     {
         using var doc = await SendAsync(HttpMethod.Get, "/configs", null, ct).ConfigureAwait(false);
-        return doc.RootElement.TryGetProperty("mode", out var m) ? m.GetString() ?? "" : "";
+        var root = doc.RootElement;
+
+        var mode = root.TryGetProperty("mode", out var m) ? m.GetString() ?? "" : "";
+        var mixedPort = root.TryGetProperty("mixed-port", out var p) && p.TryGetInt32(out var pv) ? pv : 0;
+
+        var tun = false;
+        if (root.TryGetProperty("tun", out var t) && t.ValueKind == JsonValueKind.Object &&
+            t.TryGetProperty("enable", out var e))
+        {
+            tun = e.ValueKind == JsonValueKind.True;
+        }
+
+        return new ClashConfig(mode, tun, mixedPort);
     }
 
-    /// <summary>GET /connections → 累计上传 / 下载字节数（用来算实时网速）。</summary>
-    public async Task<(long Up, long Down)> GetTotalsAsync(CancellationToken ct)
+    /// <summary>GET /connections → 累计上传 / 下载字节数 + 活动连接数。</summary>
+    public async Task<ClashTraffic> GetTrafficAsync(CancellationToken ct)
     {
         using var doc = await SendAsync(HttpMethod.Get, "/connections", null, ct).ConfigureAwait(false);
         var root = doc.RootElement;
+
         var up = root.TryGetProperty("uploadTotal", out var u) && u.TryGetInt64(out var uv) ? uv : 0;
         var down = root.TryGetProperty("downloadTotal", out var d) && d.TryGetInt64(out var dv) ? dv : 0;
-        return (up, down);
+        var count = root.TryGetProperty("connections", out var c) && c.ValueKind == JsonValueKind.Array
+            ? c.GetArrayLength()
+            : 0;
+
+        return new ClashTraffic(up, down, count);
     }
 
     /// <summary>GET /proxies → 所有策略组及其节点、当前选择、最近延迟。</summary>
