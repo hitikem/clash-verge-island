@@ -3,9 +3,11 @@ using Microsoft.UI.Xaml.Media.Imaging;
 namespace ClashVergeIsland;
 
 /// <summary>
-/// 国旗图片库：从插件目录的 assets/flags/&lt;小写地区代码&gt;.png 取图。
+/// 国旗图片库：从插件目录的 flags/&lt;小写地区代码&gt;.png 取图。
 ///
 /// 为什么要自带图片：Windows 系统字体里没有国旗图案，打 🇯🇵 只会显示成「JP」两个字母。
+/// 目录不叫 assets：WinUI 会把 Assets\** 再当资源拷一份，而 Windows 路径不区分大小写，
+/// 叫 assets 会让国旗在包里出现两遍。
 ///
 /// 取到的图和「取不到」这个结果都会缓存，避免每 2 秒重复碰磁盘；
 /// 只在 UI 线程用（BitmapImage 不能在后台线程创建）。
@@ -19,7 +21,7 @@ public sealed class FlagLibrary
     private readonly Dictionary<string, BitmapImage?> _cache = new(StringComparer.Ordinal);
 
     public FlagLibrary(string pluginDirectory) =>
-        _directory = System.IO.Path.Combine(pluginDirectory, "assets", "flags");
+        _directory = System.IO.Path.Combine(pluginDirectory, "flags");
 
     public string Directory => _directory;
 

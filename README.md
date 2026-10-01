@@ -40,7 +40,7 @@ Clash Verge Rev 从 **v2.4.0** 起**默认关闭**了对外接口，所以插件
 ## 说明
 
 - **国旗**：Windows 系统字体里没有国旗图案（打 `🇯🇵` 只会显示成「JP」两个字母），
-  所以插件自带 82 面小国旗 PNG（`assets/flags/<代码>.png`，来自 [flagcdn](https://flagcdn.com)，
+  所以插件自带 82 面小国旗 PNG（`flags/<代码>.png`，来自 [flagcdn](https://flagcdn.com)，
   基于 MIT 许可的 flag-icons 项目，约 18 KB）。认不出地区时退回地球图标；
   认得出地区但缺对应图时，退回「国家色 + 两个字母」的徽章。
 - 策略组列表比较大，插件每 3 次刷新（约 6 秒）才拉一次；网速和模式每 2 秒更新。

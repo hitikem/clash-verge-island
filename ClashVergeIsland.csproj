@@ -36,9 +36,18 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- 国旗图片：Windows 字体里没有国旗图案，只能自己带 -->
-    <Content Include="assets\flags\*.png" CopyToOutputDirectory="PreserveNewest" />
+    <!-- 国旗图片：Windows 字体里没有国旗图案，只能自己带。
+         必须用 None 而不是 Content：Content 会被 WinUI 的资源管线再拷一份到
+         <项目名>\ 目录下，包体积直接翻倍（市场 CI 会挑刺）。
+         None + CopyToOutputDirectory 一样能进输出目录，但不会进资源管线。 -->
+    <None Include="flags\*.png" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <!-- WinUI 的资源管线会把图片再拷一份到 <项目名>\ 目录下，导致国旗在包里出现两遍。
+       插件只在运行时从 flags\ 目录读图，不消费那份 PRI 资源目录，所以直接删掉它。 -->
+  <Target Name="RemoveDuplicateAssetCopy" AfterTargets="Build">
+    <RemoveDir Directories="$(OutDir)$(RootNamespace)" ContinueOnError="true" />
+  </Target>
 
   <!-- 构建后：把插件文件拷进宿主 plugins\<id>\ 目录（宿主的运行时文件不拷） -->
   <Target Name="CopyToWinIsland" AfterTargets="Build">
