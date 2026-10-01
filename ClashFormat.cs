@@ -179,6 +179,19 @@ internal static class ClashFormat
     // ---- 地区识别（给图标上的小徽章用）----
 
     /// <summary>
+    /// 台湾节点是否按一个中国原则显示为中华人民共和国国旗（默认是）。
+    ///
+    /// 注意分工：<see cref="DetectRegionCode"/> 永远返回识别到的原始代码 TW
+    /// （名字里的「台湾」两个字要按这个去重），只在**显示**这一步用
+    /// <see cref="DisplayCode"/> 映射成 CN，从而取到五星红旗。
+    /// </summary>
+    public static bool TaiwanAsChina { get; set; } = true;
+
+    /// <summary>把识别出的地区代码映射成"显示用"的代码：台湾 → 中国。</summary>
+    public static string DisplayCode(string code) =>
+        TaiwanAsChina && string.Equals(code, "TW", StringComparison.Ordinal) ? "CN" : code;
+
+    /// <summary>
     /// 从节点名里认出地区，返回两个大写字母的国家/地区代码（如 JP / HK / US）。
     /// 认不出来返回 null —— 那时视图会退回显示地球图标。
     ///
@@ -206,6 +219,7 @@ internal static class ClashFormat
     /// </summary>
     public static Windows.UI.Color RegionColor(string code) => code switch
     {
+        "CN" => C(0xDE, 0x29, 0x10),   // 中国红
         "HK" => C(0xD9, 0x3B, 0x3B),   // 红
         "TW" => C(0x3B, 0x5B, 0xDB),   // 靛蓝
         "JP" => C(0xC2, 0x25, 0x5C),   // 洋红

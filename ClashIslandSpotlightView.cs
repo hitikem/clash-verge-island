@@ -2,6 +2,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
+using Microsoft.UI.Xaml.Shapes;
 using WinIsland.Core;
 
 namespace ClashVergeIsland;
@@ -73,6 +74,18 @@ public sealed class ClashIslandSpotlightView : UserControl
 
     /// <summary>每个测速网站芯片里的延迟文字（键是网站 URL），实时更新。</summary>
     private readonly Dictionary<string, TextBlock> _targetDelays = new(StringComparer.Ordinal);
+
+    /// <summary>延迟趋势曲线：光看当前值看不出规律，得有一段历史。</summary>
+    private readonly TextBlock _trendCaption = new()
+    {
+        Text = "延迟趋势",
+        FontSize = 12,
+        VerticalAlignment = VerticalAlignment.Center,
+    };
+
+    private readonly Canvas _trendCanvas = new() { Height = 26, Width = 620 };
+    private readonly Polyline _trendLine;
+    private readonly SolidColorBrush _trendBrush = new(Windows.UI.Color.FromArgb(220, 0x4C, 0xC2, 0xFF));
 
     private readonly FlagLibrary _flags;
     private readonly TextBox _search = new() { PlaceholderText = "搜索节点…", MinWidth = 180 };
@@ -290,7 +303,28 @@ public sealed class ClashIslandSpotlightView : UserControl
         root.Children.Add(titleRow);
         root.Children.Add(_status);
         root.Children.Add(new Border { Height = 1, Background = _dividerBrush });
-        // 顺序：先看数据（网站延迟）→ 再动设置（模式 / 分组）→ 最后是节点列表
+
+        // 延迟趋势：横轴间隔 = 刷新间隔（均匀），纵轴是延迟，越低的点画得越高
+        _trendCaption.Foreground = _faintBrush;
+        _trendLine = new Polyline
+        {
+            Stroke = _trendBrush,
+            StrokeThickness = 1.8,
+            StrokeLineJoin = PenLineJoin.Round,
+        };
+        _trendCanvas.Children.Add(_trendLine);
+
+        var trendRow = new Grid();
+        trendRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        trendRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        Grid.SetColumn(_trendCaption, 0);
+        Grid.SetColumn(_trendCanvas, 1);
+        _trendCaption.Margin = new Thickness(0, 0, 12, 0);
+        trendRow.Children.Add(_trendCaption);
+        trendRow.Children.Add(_trendCanvas);
+        root.Children.Add(trendRow);
+
+        // 顺序：先看数据（趋势 + 网站延迟）→ 再动设置（模式 / 分组）→ 最后是节点列表
         root.Children.Add(targetRow);
         root.Children.Add(modeRow);
         root.Children.Add(groupRow);
@@ -350,6 +384,7 @@ public sealed class ClashIslandSpotlightView : UserControl
                        $"延迟 {ClashFormat.Delay(snapshot.ActiveDelay)}   ·   Mihomo {snapshot.Version}";
         ApplyHeaderFlag(snapshot.ActiveNode);
         RefreshTargetButtons(snapshot);
+        DrawTrend(snapshot.DelayTrend);
         _speedUp.Text = $"↑ {ClashFormat.Speed(snapshot.UpPerSec)}";
         _speedDown.Text = $"↓ {ClashFormat.Speed(snapshot.DownPerSec)}";
         _hint.Text = "点任意节点即可切换；绿色为延迟低，红色为延迟高或不可用。网站延迟：" +
@@ -558,7 +593,33 @@ public sealed class ClashIslandSpotlightView : UserControl
     }
 
     /// <summary>
-    /// 把「当前选中的测速网站」那颗按钮点亮，
+    /// 画延迟趋势。纵轴不从头开始，而是贴着这段数据自己的最小/最大值铺满 ——
+    /// 延迟天生上下浮动几十毫秒，从 0 开始画会变成一条直线，看不出任何规律。
+    /// </summary>
+    private void DrawTrend(int[] values)
+    {
+        _trendLine.Points.Clear();
+        _trendCaption.Text = values.Length < 2 ? "延迟趋势（采集中…）" : $"延迟趋势（{values.Length} 次）";
+
+        if (values.Length < 2) return;
+
+        var width = _trendCanvas.Width;
+        var height = _trendCanvas.Height;
+        var min = values.Min();
+        var max = values.Max();
+        var span = Math.Max(1, max - min);
+        var step = width / (values.Length - 1);
+
+        for (var i = 0; i < values.Length; i++)
+        {
+            var x = i * step;
+            // 延迟越小越好 → 数值越小画得越高，一眼看出"什么时候变差了"
+            var y = 2 + (height - 4) * (1 - (values[i] - min) / (double)span);
+            _trendLine.Points.Add(new Windows.Foundation.Point(x, y));
+        }
+    }
+
+    /// <summary>把「当前选中的测速网站」那颗按钮点亮，
     /// 并把每个网站对**当前节点**的延迟填进各自的芯片里。
     /// </summary>
     private void RefreshTargetButtons(ClashSnapshot snapshot)
@@ -602,7 +663,7 @@ public sealed class ClashIslandSpotlightView : UserControl
     /// <summary>卡片左上角的大国旗。只在地区真的变了才重建，别每 2 秒造一堆控件。</summary>
     private void ApplyHeaderFlag(string nodeName)
     {
-        var code = ClashFormat.DetectRegionCode(nodeName) ?? "";
+        var code = ClashFormat.DisplayCode(ClashFormat.DetectRegionCode(nodeName) ?? "");
         if (string.Equals(code, _headerFlagCode, StringComparison.Ordinal)) return;
         _headerFlagCode = code;
 
@@ -650,8 +711,8 @@ public sealed class ClashIslandSpotlightView : UserControl
         const double height = 13;
         var margin = new Thickness(0, 0, 9, 0);
 
-        var code = ClashFormat.DetectRegionCode(nodeName);
-        var flag = code is null ? null : _flags.Get(code);
+        var code = ClashFormat.DisplayCode(ClashFormat.DetectRegionCode(nodeName) ?? "");
+        var flag = string.IsNullOrEmpty(code) ? null : _flags.Get(code);
 
         if (flag is not null)
         {

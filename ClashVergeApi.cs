@@ -75,6 +75,9 @@ public sealed class ClashSnapshot
     /// <summary>当前节点对各个测速网站的延迟（岛上和卡片里都显示它）。</summary>
     public List<ClashSiteLatency> Sites { get; set; } = new();
 
+    /// <summary>延迟的历史采样（每次自动测速记一个点），用来看变化规律。</summary>
+    public int[] DelayTrend { get; set; } = Array.Empty<int>();
+
     /// <summary>本次运行累计上传 / 下载字节数。</summary>
     public long UpTotal { get; set; }
     public long DownTotal { get; set; }

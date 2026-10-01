@@ -53,8 +53,15 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
     /// <summary>上一次"全网站测速"的时间，卡片打开时用它判断数据够不够新。</summary>
     private DateTimeOffset _lastSiteTest = DateTimeOffset.MinValue;
 
-    /// <summary>正在跑全网站测速：防止定时重测和手动点「全部测试」同时开跑。</summary>
-    private bool _siteTestBusy;
+    /// <summary>0/1：全网站测速是否正在跑（给 Interlocked 用）。入口防重入，见 TestAllSitesAsync。</summary>
+    private int _siteTestRunning;
+
+    /// <summary>
+    /// 延迟的历史采样：每完成一轮网站测速就记一个点。
+    /// 横轴间隔 = 刷新间隔，所以是均匀的 —— 这样才看得出"变化规律"，而不只是当前值。
+    /// </summary>
+    private const int DelayTrendLength = 48;
+    private readonly Queue<int> _delayTrend = new();
 
     /// <summary>
     /// 卡片打开时调用：网站延迟超过 5 分钟没更新就自动测一遍，
@@ -68,8 +75,8 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         _ = TestAllSitesAsync();
     }
 
-    /// <summary>网站延迟自动刷新间隔（秒）；0 = 关闭。</summary>
-    private int SiteRefreshSeconds => Settings.Get("siterefresh", 60);
+    /// <summary>网站延迟自动刷新间隔（秒）；0 = 关闭。默认 25 秒（一天约 2.8 MB）。</summary>
+    private int SiteRefreshSeconds => Settings.Get("siterefresh", 25);
 
     /// <summary>距离上次"全网站测速"过去了多少秒；-1 表示还没测过。</summary>
     public int SiteTestAgeSeconds => _lastSiteTest == DateTimeOffset.MinValue
@@ -83,18 +90,11 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
     private async Task MaybeRefreshSiteDelaysAsync()
     {
         var seconds = SiteRefreshSeconds;
-        if (seconds <= 0 || _stopped || _siteTestBusy || !_snapshot.Connected) return;
+        if (seconds <= 0 || _stopped || !_snapshot.Connected) return;
         if (DateTimeOffset.UtcNow - _lastSiteTest < TimeSpan.FromSeconds(seconds)) return;
 
-        _siteTestBusy = true;
-        try
-        {
-            await TestAllSitesAsync().ConfigureAwait(false);
-        }
-        finally
-        {
-            _siteTestBusy = false;
-        }
+        // 防重入交给 TestAllSitesAsync 自己（它有三个调用方）
+        await TestAllSitesAsync().ConfigureAwait(false);
     }
 
     private bool _stopped;
@@ -156,6 +156,10 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
 
         _flags = new FlagLibrary(PluginDirectory);
         _targets = ClashTestTargets.Load();
+
+        // 一个中国原则：台湾节点显示中华人民共和国国旗（设置页可改）
+        ClashFormat.TaiwanAsChina = Settings.Get("twchina", true);
+
         Log.Info($"测速网站（{_targets.Count} 个）：{string.Join("、", _targets.Select(t => t.Name))}，当前用 {SelectedTargetName}");
         _view = new ClashIslandView(Manifest, Theme, _flags);
 
@@ -186,6 +190,14 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
             Context.Register(Context.OnSettingsChanged(key, () => _ = RefreshAsync($"设置变更（{key}）")));
         }
 
+        // 旗帜规则改了，下一帧就要重画（把当前快照再铺一遍）
+        Context.Register(Context.OnSettingsChanged("twchina", () =>
+        {
+            ClashFormat.TaiwanAsChina = Settings.Get("twchina", true);
+            _view.Apply(_snapshot);
+            _spotlight?.Apply(_snapshot);
+        }));
+
         if (Settings.Get("enabled", true))
         {
             SetContent(_content);
@@ -193,16 +205,27 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
 
         _ = RefreshAsync("首次加载");
 
-        // UI 线程定时器；插件停用时宿主自动停掉。
+        // UI 线程定时器（1 秒一跳）；插件停用时宿主自动停掉。
         // 注意：网站延迟的自动重测要放在 RefreshAsync **外面**——
         // RefreshAsync 持着 _gate，而重测结束后又要进 RefreshAsync，会自己把自己锁死。
-        Context.CreateTimer(TimeSpan.FromSeconds(2), repeat: true, () => _ = TickAsync());
+        Context.CreateTimer(TimeSpan.FromSeconds(1), repeat: true, () => _ = TickAsync());
         return Task.CompletedTask;
     }
 
+    /// <summary>1 秒一跳，但取数本身按各自该有的节奏走（别每样都 1 秒一次）。</summary>
+    private int _tickCount;
+
     private async Task TickAsync()
     {
-        await RefreshAsync("定时刷新").ConfigureAwait(false);
+        _tickCount++;
+
+        // 模式 / 网速 / 连接数：2 秒一次足够，没必要跟着 1 秒跑
+        if (_tickCount % 2 == 0)
+        {
+            await RefreshAsync("定时刷新").ConfigureAwait(false);
+        }
+
+        // 网站延迟：按设置走（最快可以到 1 秒）
         await MaybeRefreshSiteDelaysAsync().ConfigureAwait(false);
     }
 
@@ -349,6 +372,8 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
                 .Select(t => new ClashSiteLatency(t.Name, t.Url, _siteDelays.TryGetValue(t.Url, out var d) ? d : -1))
                 .ToList();
 
+            snapshot.DelayTrend = _delayTrend.ToArray();
+
             snapshot.Connected = true;
 
             if (reason != "定时刷新")
@@ -396,14 +421,22 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
                ?? groups.FirstOrDefault();
     }
 
-    /// <summary>把当前节点对每个测速网站都测一遍（卡片里"每个网站各自的延迟"靠它刷新）。</summary>
+    /// <summary>
+    /// 把当前节点对每个测速网站都测一遍（卡片里"每个网站各自的延迟"靠它刷新）。
+    ///
+    /// 三条路都会调它：定时自动重测、打开卡片、手动点「全部测试」。
+    /// 入口必须自己防重入 —— 否则会同时跑好几轮，日志里同一秒出现好几次同样的测速，
+    /// 既白费流量，数值也因为互相抢带宽而失真。
+    /// </summary>
     public async Task TestAllSitesAsync()
     {
-        var node = _snapshot.ActiveNode;
-        if (string.IsNullOrEmpty(node) || _targets.Count == 0) return;
+        if (Interlocked.Exchange(ref _siteTestRunning, 1) == 1) return;
 
         try
         {
+            var node = _snapshot.ActiveNode;
+            if (string.IsNullOrEmpty(node) || _targets.Count == 0) return;
+
             _lastSiteTest = DateTimeOffset.UtcNow;
             Log.Info($"开始全网站测速：{node}");
             Context.RunOnUI(() => Context.Island.ShowMessage(new IslandMessage
@@ -430,10 +463,26 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
 
             _tick = 0;
             await RefreshAsync($"全网站测速 → {node}").ConfigureAwait(false);
+
+            // 记一个延迟采样点（用当前选中网站测出来的那个值，没有就退回节点延迟）
+            var sample = _siteDelays.TryGetValue(SelectedTargetUrl, out var measured) && measured >= 0
+                ? measured
+                : _snapshot.ActiveDelay;
+
+            if (sample >= 0)
+            {
+                _delayTrend.Enqueue(sample);
+                while (_delayTrend.Count > DelayTrendLength) _delayTrend.Dequeue();
+            }
         }
         catch (Exception ex)
         {
             Log.Error("全网站测速失败", ex);
+        }
+        finally
+        {
+            // 无论成功失败都要放开：漏了这行，之后所有测速都会被永久挡在门外
+            Interlocked.Exchange(ref _siteTestRunning, 0);
         }
     }
 
@@ -660,6 +709,20 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
             Child = enabled,
         });
 
+        // 一个中国原则：台湾节点显示中华人民共和国国旗
+        var twChina = new CheckBox
+        {
+            Content = "台湾节点显示中华人民共和国国旗（一个中国原则）",
+            IsChecked = Settings.Get("twchina", true),
+        };
+        twChina.Checked += (_, _) => Settings.Set("twchina", true);
+        twChina.Unchecked += (_, _) => Settings.Set("twchina", false);
+        panel.Children.Add(new Border
+        {
+            Style = (Style)Application.Current.Resources["SettingsCardStyle"],
+            Child = twChina,
+        });
+
         var hostBox = new TextBox
         {
             Header = "地址",
@@ -707,21 +770,34 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
             if (Settings.Get("autotest", 0) != minutes) Settings.Set("autotest", minutes);
         };
 
-        // 网站延迟自动刷新：这就是"那四个数字多久更新一次"
-        var siteRefreshBox = new ComboBox { Header = "网站延迟刷新", MinWidth = 180 };
-        siteRefreshBox.Items.Add("关闭");
-        siteRefreshBox.Items.Add("每 30 秒");
-        siteRefreshBox.Items.Add("每 1 分钟");
-        siteRefreshBox.Items.Add("每 2 分钟");
-        siteRefreshBox.Items.Add("每 5 分钟");
-        siteRefreshBox.SelectedIndex = Settings.Get("siterefresh", 60) switch
+        // 网站延迟自动刷新：这就是"那四个数字多久更新一次"。
+        // 用 (标签, 秒数) 数组而不是 switch —— 加一档只改一处，不会再对错索引。
+        var siteOptions = new (string Label, int Seconds)[]
         {
-            30 => 1, 60 => 2, 120 => 3, 300 => 4, _ => 0,
+            ("关闭", 0),
+            ("每 1 秒（不现实：一轮就要 2 秒，很费流量）", 1),
+            ("每 5 秒（费流量，一天约 700 MB）", 5),
+            ("每 10 秒（一天约 350 MB）", 10),
+            ("每 25 秒（推荐，一天约 2.8 MB）", 25),
+            ("每 1 分钟", 60),
+            ("每 2 分钟", 120),
+            ("每 5 分钟", 300),
         };
+
+        var siteRefreshBox = new ComboBox { Header = "网站延迟刷新", MinWidth = 260 };
+        foreach (var option in siteOptions) siteRefreshBox.Items.Add(option.Label);
+
+        var currentRefresh = Settings.Get("siterefresh", 25);
+        var refreshIndex = Array.FindIndex(siteOptions, o => o.Seconds == currentRefresh);
+        siteRefreshBox.SelectedIndex = refreshIndex >= 0 ? refreshIndex : 4;
+
         siteRefreshBox.SelectionChanged += (_, _) =>
         {
-            var seconds = siteRefreshBox.SelectedIndex switch { 1 => 30, 2 => 60, 3 => 120, 4 => 300, _ => 0 };
-            if (Settings.Get("siterefresh", 60) != seconds) Settings.Set("siterefresh", seconds);
+            var i = siteRefreshBox.SelectedIndex;
+            if (i < 0 || i >= siteOptions.Length) return;
+
+            var seconds = siteOptions[i].Seconds;
+            if (Settings.Get("siterefresh", 25) != seconds) Settings.Set("siterefresh", seconds);
         };
 
         var status = new TextBlock { TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = 0.75 };

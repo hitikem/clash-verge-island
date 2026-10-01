@@ -12,6 +12,9 @@ namespace ClashVergeIsland;
 /// </summary>
 public sealed class FlagLibrary
 {
+    /// <summary>解码宽度：既够铺满最小的 19px 小旗，也够 34px 的大旗用。</summary>
+    private const int DecodeWidth = 40;
+
     private readonly string _directory;
     private readonly Dictionary<string, BitmapImage?> _cache = new(StringComparer.Ordinal);
 
@@ -30,7 +33,17 @@ public sealed class FlagLibrary
         try
         {
             var path = System.IO.Path.Combine(_directory, code.ToLowerInvariant() + ".png");
-            if (System.IO.File.Exists(path)) image = new BitmapImage(new Uri(path));
+            if (System.IO.File.Exists(path))
+            {
+                image = new BitmapImage
+                {
+                    // 关键：让解码器直接缩到接近显示尺寸再交给合成器。
+                    // 源图是 160px 宽，实际最大只画到 34px；不指定的话会先整张解码再由合成器缩，
+                    // 边缘细节反而更糊。40 是"能同时喂饱 19px 小旗和 34px 大旗"的尺寸。
+                    DecodePixelWidth = DecodeWidth,
+                    UriSource = new Uri(path),
+                };
+            }
         }
         catch (Exception)
         {

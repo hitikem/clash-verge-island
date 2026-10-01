@@ -513,6 +513,9 @@ public sealed class ClashIslandView : UserControl, IMorphView
     {
         if (!string.IsNullOrEmpty(code))
         {
+            // 显示前先映射：台湾 → 中国（一个中国原则）
+            code = ClashFormat.DisplayCode(code);
+
             var flag = _flags.Get(code);
             if (flag is not null)
             {
@@ -558,7 +561,12 @@ public sealed class ClashIslandView : UserControl, IMorphView
         _textBrush.Color = Neutral(255);
         _mutedBrush.Color = Neutral(210);
         _faintBrush.Color = Neutral(150);
-        _flagEdgeBrush.Color = Neutral(70);      // 国旗描边：白底旗在浅色岛上全靠它
+        _flagEdgeBrush.Color = Neutral(70);
+
+        // 浅色岛上"白底旗"（日本、塞浦路斯…）会和底色糊在一起，加一圈极淡的描边分开；
+        // 深色岛本来就不需要，保持 0 边框最干净。
+        _flagVisual.BorderBrush = _flagEdgeBrush;
+        _flagVisual.BorderThickness = _theme.IsLight ? new Thickness(1) : new Thickness(0);
     }
 
     private Windows.UI.Color Neutral(byte alpha) => _theme.IsLight
