@@ -14,6 +14,13 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
 {
     private const int DefaultPort = 9097;
 
+    /// <summary>
+    /// 默认岛体优先级。取 150 而不是插件常见的 30：
+    /// 内置音乐模块放歌时会把优先级抬到 200，定低了插件在放歌时永远看不见。
+    /// 150 的效果是「放歌时让给音乐，不放歌时自己显示」——两边都不用抢。
+    /// </summary>
+    private const int DefaultPriority = 150;
+
     /// <summary>趋势曲线保留的采样点数（每次刷新一个点，约 2 秒一个）。</summary>
     private const int HistoryLength = 60;
 
@@ -163,17 +170,7 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         Log.Info($"测速网站（{_targets.Count} 个）：{string.Join("、", _targets.Select(t => t.Name))}，当前用 {SelectedTargetName}");
         _view = new ClashIslandView(Manifest, Theme, _flags);
 
-        _content = new IslandLiveContent
-        {
-            Priority = Settings.Get("priority", 30),
-            OwnerLabel = Manifest.Name,
-            OwnerGlyph = Manifest.IconGlyph,
-            OwnerAccent = Windows.UI.Color.FromArgb(255, 0x4C, 0xC2, 0xFF),
-            MorphView = _view,
-            CompactSize = new Windows.Foundation.Size(180, 40),
-            ExpandedSize = new Windows.Foundation.Size(420, 140),
-            OnTap = OpenSpotlight,          // 点击岛体 = 打开聚光卡
-        };
+        _content = CreateContent();
 
         Context.Island.AddSettingsPage(new SettingsPageDescriptor(
             Manifest.Id, Manifest.Name, Manifest.IconGlyph ?? "\uE774", BuildSettingsPage, order: 80));
@@ -182,6 +179,14 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         Context.Register(Context.OnSettingsChanged("enabled", () =>
         {
             SetContent(Settings.Get("enabled", true) ? _content : null);
+        }));
+
+        // 优先级改了要**重新注册**才生效：它是注册时交给宿主的，改设置本身不会动岛体
+        Context.Register(Context.OnSettingsChanged("priority", () =>
+        {
+            _content = CreateContent();
+            if (Settings.Get("enabled", true)) SetContent(_content);
+            Log.Info($"岛体优先级已改为 {Settings.Get("priority", DefaultPriority)}");
         }));
 
         // 连接参数一改就立刻重新取数
@@ -211,6 +216,22 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         Context.CreateTimer(TimeSpan.FromSeconds(1), repeat: true, () => _ = TickAsync());
         return Task.CompletedTask;
     }
+
+    /// <summary>
+    /// 组装岛体内容。抽成方法是为了改优先级时能重建一份 ——
+    /// 优先级是注册时交给宿主的，光改设置不会让已经注册的内容换优先级。
+    /// </summary>
+    private IslandLiveContent CreateContent() => new()
+    {
+        Priority = Settings.Get("priority", DefaultPriority),
+        OwnerLabel = Manifest.Name,
+        OwnerGlyph = Manifest.IconGlyph,
+        OwnerAccent = Windows.UI.Color.FromArgb(255, 0x4C, 0xC2, 0xFF),
+        MorphView = _view,
+        CompactSize = new Windows.Foundation.Size(180, 40),
+        ExpandedSize = new Windows.Foundation.Size(420, 140),
+        OnTap = OpenSpotlight,          // 点击岛体 = 打开聚光卡
+    };
 
     /// <summary>1 秒一跳，但取数本身按各自该有的节奏走（别每样都 1 秒一次）。</summary>
     private int _tickCount;
@@ -745,6 +766,53 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         {
             Style = (Style)Application.Current.Resources["SettingsCardStyle"],
             Child = twChina,
+        });
+
+        // 灵动岛优先级：多个插件 / 内置模块抢岛时，数值大的占岛，其余进展开队列。
+        // 必须能在界面上调 —— 冲突是必然会发生的（内置音乐模块放歌时会把自己抬到 200）。
+        var priorityOptions = new (string Label, int Value)[]
+        {
+            ("最低 30（几乎总让位）", 30),
+            ("低 50", 50),
+            ("中 100", 100),
+            ("高 150（推荐：放歌时让给音乐）", 150),
+            ("最高 210（始终占岛，压过音乐）", 210),
+        };
+
+        var priorityBox = new ComboBox { Header = "灵动岛优先级", MinWidth = 300 };
+        foreach (var option in priorityOptions) priorityBox.Items.Add(option.Label);
+
+        var currentPriority = Settings.Get("priority", DefaultPriority);
+        var priorityIndex = Array.FindIndex(priorityOptions, o => o.Value == currentPriority);
+        priorityBox.SelectedIndex = priorityIndex >= 0 ? priorityIndex : 3;
+        priorityBox.SelectionChanged += (_, _) =>
+        {
+            var i = priorityBox.SelectedIndex;
+            if (i < 0 || i >= priorityOptions.Length) return;
+
+            var value = priorityOptions[i].Value;
+            if (Settings.Get("priority", DefaultPriority) != value) Settings.Set("priority", value);
+        };
+
+        panel.Children.Add(new Border
+        {
+            Style = (Style)Application.Current.Resources["SettingsCardStyle"],
+            Child = new StackPanel
+            {
+                Spacing = 6,
+                Children =
+                {
+                    priorityBox,
+                    new TextBlock
+                    {
+                        Text = "岛体同一时刻只显示优先级最高的那个内容，其它的在「悬停展开」后的队列里。\n" +
+                               "内置音乐模块在放歌时会把优先级抬到 200：选 150 就是「放歌时让给音乐，不放歌时显示本插件」。",
+                        TextWrapping = TextWrapping.Wrap,
+                        Opacity = 0.7,
+                        FontSize = 12,
+                    },
+                },
+            },
         });
 
         // 自动检测到的值只作为占位提示；输入框留空就走自动检测
