@@ -40,10 +40,14 @@ public sealed class ClashIslandSpotlightView : UserControl
     /// 延迟颜色用共享画刷。原来是每次刷新都给每个节点 new 一个画刷
     /// （300 个节点 × 每 2 秒一次），纯属浪费；延迟只有四档，缓存四支就够了。
     /// </summary>
-    private readonly SolidColorBrush _delayUnknownBrush = new(ClashFormat.DelayColor(-1));
-    private readonly SolidColorBrush _delayGoodBrush = new(ClashFormat.DelayColor(50));
-    private readonly SolidColorBrush _delayWarnBrush = new(ClashFormat.DelayColor(200));
-    private readonly SolidColorBrush _delayBadBrush = new(ClashFormat.DelayColor(400));
+    /// <summary>
+    /// 延迟胶囊的底色。用饱和色而不是亮色，因为胶囊里是白字 ——
+    /// 这样和 Clash Verge 节点列表里那种"绿底白字小胶囊"是一致的观感。
+    /// </summary>
+    private readonly SolidColorBrush _delayUnknownBrush = new(Windows.UI.Color.FromArgb(255, 0x5C, 0x6B, 0x7A));
+    private readonly SolidColorBrush _delayGoodBrush = new(Windows.UI.Color.FromArgb(255, 0x2E, 0xA0, 0x43));
+    private readonly SolidColorBrush _delayWarnBrush = new(Windows.UI.Color.FromArgb(255, 0xC7, 0x8A, 0x0E));
+    private readonly SolidColorBrush _delayBadBrush = new(Windows.UI.Color.FromArgb(255, 0xD9, 0x3B, 0x3B));
 
     private SolidColorBrush DelayBrush(int ms) => ms switch
     {
@@ -54,11 +58,19 @@ public sealed class ClashIslandSpotlightView : UserControl
     };
 
     private readonly Dictionary<string, TextBlock> _delayLabels = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Border> _delayPills = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Button> _rowButtons = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TextBlock> _rowTitles = new(StringComparer.Ordinal);
 
+    /// <summary>延迟胶囊里的字：胶囊底色是饱和色，所以恒用白字。</summary>
+    private readonly SolidColorBrush _pillTextBrush =
+        new(Windows.UI.Color.FromArgb(255, 255, 255, 255));
+
     private readonly List<Button> _modeButtons = new();
     private readonly Dictionary<string, Button> _targetButtons = new(StringComparer.Ordinal);
+
+    /// <summary>每个测速网站芯片里的延迟文字（键是网站 URL），实时更新。</summary>
+    private readonly Dictionary<string, TextBlock> _targetDelays = new(StringComparer.Ordinal);
 
     private readonly FlagLibrary _flags;
     private readonly TextBox _search = new() { PlaceholderText = "搜索节点…", MinWidth = 180 };
@@ -174,17 +186,46 @@ public sealed class ClashIslandSpotlightView : UserControl
         });
         foreach (var target in _plugin.Targets)
         {
+            // 每个网站芯片 = 网站名 + 当前节点对它的延迟（实时刷新）
+            var nameText = new TextBlock
+            {
+                Text = target.Name,
+                FontSize = 12,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            var delayText = new TextBlock
+            {
+                Text = "--",
+                FontSize = 12,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                Margin = new Thickness(6, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+
+            var content = new StackPanel { Orientation = Orientation.Horizontal };
+            content.Children.Add(nameText);
+            content.Children.Add(delayText);
+
             var button = new Button
             {
-                Content = target.Name,
+                Content = content,
                 Tag = target.Name,
-                FontSize = 12,
                 Padding = new Thickness(10, 4, 10, 4),
             };
             button.Click += (_, _) => _plugin.SetTarget(target.Name);
             _targetButtons[target.Name] = button;
+            _targetDelays[target.Url] = delayText;
             targetRow.Children.Add(button);
         }
+
+        var testAll = new Button
+        {
+            Content = "全部测试",
+            FontSize = 12,
+            Padding = new Thickness(10, 4, 10, 4),
+        };
+        testAll.Click += async (_, _) => await _plugin.TestAllSitesAsync();
+        targetRow.Children.Add(testAll);
 
         var sort = new CheckBox
         {
@@ -250,6 +291,7 @@ public sealed class ClashIslandSpotlightView : UserControl
     {
         _theme.Changed -= ApplyThemeColors;
         _delayLabels.Clear();
+        _delayPills.Clear();
         _rowButtons.Clear();
         _rowTitles.Clear();
         _nodeList.Children.Clear();
@@ -268,6 +310,7 @@ public sealed class ClashIslandSpotlightView : UserControl
                          "然后把端口和密码填到本插件的设置页。";
             _nodeList.Children.Clear();
             _delayLabels.Clear();
+            _delayPills.Clear();
             _rowButtons.Clear();
             _rowTitles.Clear();
             _builtGroup = "";
@@ -279,7 +322,7 @@ public sealed class ClashIslandSpotlightView : UserControl
                        $"{ClashFormat.CleanNodeKeepRegion(snapshot.ActiveNode)} · " +
                        $"延迟 {ClashFormat.Delay(snapshot.ActiveDelay)}";
         ApplyHeaderFlag(snapshot.ActiveNode);
-        RefreshTargetButtons();
+        RefreshTargetButtons(snapshot);
         _modeLine.Text = $"模式：{ClashFormat.Mode(snapshot.Mode)}    分组：{snapshot.ActiveGroup}";
         _speedLine.Text = $"实时网速：↑ {ClashFormat.Speed(snapshot.UpPerSec)}    ↓ {ClashFormat.Speed(snapshot.DownPerSec)}";
         _hint.Text = "点任意节点即可切换；绿色为延迟低，红色为延迟高或不可用。";
@@ -347,6 +390,7 @@ public sealed class ClashIslandSpotlightView : UserControl
             _builtGroup = group.Name;
             _builtSignature = signature;
             _delayLabels.Clear();
+            _delayPills.Clear();
             _rowButtons.Clear();
             _rowTitles.Clear();
             _nodeList.Children.Clear();
@@ -384,8 +428,12 @@ public sealed class ClashIslandSpotlightView : UserControl
         {
             if (_delayLabels.TryGetValue(node.Name, out var label))
             {
-                label.Text = ClashFormat.Delay(node.Delay);
-                label.Foreground = DelayBrush(node.Delay);
+                label.Text = ClashFormat.DelayShort(node.Delay);
+            }
+
+            if (_delayPills.TryGetValue(node.Name, out var pill))
+            {
+                pill.Background = DelayBrush(node.Delay);
             }
 
             if (_rowButtons.TryGetValue(node.Name, out var button))
@@ -418,11 +466,23 @@ public sealed class ClashIslandSpotlightView : UserControl
 
         var delay = new TextBlock
         {
-            Text = ClashFormat.Delay(node.Delay),
-            FontSize = 12,
+            Text = ClashFormat.DelayShort(node.Delay),
+            FontSize = 11,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(10, 0, 0, 0),
-            Foreground = DelayBrush(node.Delay),
+            Foreground = _pillTextBrush,
+        };
+
+        // 延迟做成小胶囊（和 Clash Verge 节点列表一个观感）：定宽，所有行的胶囊右边缘对齐
+        var delayPill = new Border
+        {
+            Width = 52,
+            CornerRadius = new CornerRadius(9),
+            Padding = new Thickness(0, 2, 0, 2),
+            Background = DelayBrush(node.Delay),
+            VerticalAlignment = VerticalAlignment.Center,
+            Child = delay,
         };
 
         var glyph = BuildFlagGlyph(node.Name);
@@ -433,10 +493,10 @@ public sealed class ClashIslandSpotlightView : UserControl
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });                        // 延迟
         Grid.SetColumn(glyph, 0);
         Grid.SetColumn(name, 1);
-        Grid.SetColumn(delay, 2);
+        Grid.SetColumn(delayPill, 2);
         grid.Children.Add(glyph);
         grid.Children.Add(name);
-        grid.Children.Add(delay);
+        grid.Children.Add(delayPill);
 
         var button = new Button
         {
@@ -452,21 +512,36 @@ public sealed class ClashIslandSpotlightView : UserControl
         button.Click += async (_, _) => await _plugin.SelectNodeAsync(groupName, node.Name);
 
         _delayLabels[node.Name] = delay;
+        _delayPills[node.Name] = delayPill;
         _rowButtons[node.Name] = button;
         _rowTitles[node.Name] = name;
         return button;
     }
 
-    /// <summary>把「当前选中的测速网站」那颗按钮点亮。</summary>
-    private void RefreshTargetButtons()
+    /// <summary>
+    /// 把「当前选中的测速网站」那颗按钮点亮，
+    /// 并把每个网站对**当前节点**的延迟填进各自的芯片里。
+    /// </summary>
+    private void RefreshTargetButtons(ClashSnapshot snapshot)
     {
         foreach (var (name, button) in _targetButtons)
         {
             var selected = string.Equals(name, _plugin.SelectedTargetName, StringComparison.Ordinal);
             button.Background = selected ? _selectedRowBrush : _rowBrush;
-            button.FontWeight = selected
-                ? Microsoft.UI.Text.FontWeights.SemiBold
-                : Microsoft.UI.Text.FontWeights.Normal;
+        }
+
+        foreach (var (url, text) in _targetDelays)
+        {
+            if (snapshot.SiteDelays.TryGetValue(url, out var delay))
+            {
+                text.Text = ClashFormat.DelayShort(delay);
+                text.Foreground = DelayBrush(delay);
+            }
+            else
+            {
+                text.Text = "--";
+                text.Foreground = _faintBrush;
+            }
         }
     }
 

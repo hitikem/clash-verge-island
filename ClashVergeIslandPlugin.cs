@@ -44,6 +44,9 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
     private double _upSmooth = -1;
     private double _downSmooth = -1;
 
+    /// <summary>上一次取到的"当前节点对各个网站的延迟"，用于非重拉轮次沿用。</summary>
+    private Dictionary<string, int> _siteDelays = new(StringComparer.Ordinal);
+
     /// <summary>上一次自动测速的时间（"自动测速"关掉时用不到）。</summary>
     private DateTimeOffset _lastAutoTest = DateTimeOffset.MinValue;
 
@@ -268,6 +271,16 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
             snapshot.ActiveGroup = active?.Name ?? "";
             snapshot.ActiveNode = active?.Now ?? "";
             snapshot.ActiveDelay = active?.Nodes.FirstOrDefault(n => n.Name == snapshot.ActiveNode)?.Delay ?? -1;
+
+            // 当前节点对每个测速网站的延迟。只在重拉策略组那一轮取，别每 2 秒多发一次请求。
+            if (_tick % 3 == 1 && !string.IsNullOrEmpty(snapshot.ActiveNode))
+            {
+                _siteDelays = await _api
+                    .GetNodeSiteDelaysAsync(snapshot.ActiveNode, _targets.Select(t => t.Url).ToList(), ct)
+                    .ConfigureAwait(false);
+            }
+            snapshot.SiteDelays = _siteDelays;
+
             snapshot.Connected = true;
 
             if (reason != "定时刷新")
@@ -313,6 +326,46 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         return groups.FirstOrDefault(g => g.Type == "Selector" && g.Name != "GLOBAL")
                ?? groups.FirstOrDefault(g => g.Name != "GLOBAL")
                ?? groups.FirstOrDefault();
+    }
+
+    /// <summary>把当前节点对每个测速网站都测一遍（卡片里"每个网站各自的延迟"靠它刷新）。</summary>
+    public async Task TestAllSitesAsync()
+    {
+        var node = _snapshot.ActiveNode;
+        if (string.IsNullOrEmpty(node) || _targets.Count == 0) return;
+
+        try
+        {
+            Log.Info($"开始全网站测速：{node}");
+            Context.RunOnUI(() => Context.Island.ShowMessage(new IslandMessage
+            {
+                Title = Manifest.Name,
+                Text = $"正在测 {_targets.Count} 个网站…",
+                Glyph = Manifest.IconGlyph ?? "\uE774",
+                Duration = TimeSpan.FromSeconds(2),
+            }));
+
+            foreach (var target in _targets)
+            {
+                try
+                {
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+                    var delay = await _api.TestNodeAsync(node, target.Url, cts.Token).ConfigureAwait(false);
+                    Log.Info($"  {target.Name} → {delay} ms");
+                }
+                catch (Exception ex)
+                {
+                    Log.Warn($"  {target.Name} 测速失败（已忽略）：{ex.Message}");
+                }
+            }
+
+            _tick = 0;
+            await RefreshAsync($"全网站测速 → {node}").ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log.Error("全网站测速失败", ex);
+        }
     }
 
     /// <summary>当前该用哪个测速地址：优先用户选的网站，没配就退回策略组自带的。</summary>

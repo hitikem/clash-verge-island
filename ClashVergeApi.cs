@@ -69,6 +69,9 @@ public sealed class ClashSnapshot
     /// <summary>当前活动连接数。</summary>
     public int Connections { get; set; }
 
+    /// <summary>当前节点对各个测速网站的延迟（键是网站 URL）——卡片里实时显示用。</summary>
+    public Dictionary<string, int> SiteDelays { get; set; } = new(StringComparer.Ordinal);
+
     /// <summary>本次运行累计上传 / 下载字节数。</summary>
     public long UpTotal { get; set; }
     public long DownTotal { get; set; }
@@ -330,6 +333,28 @@ internal sealed class ClashVergeApi : IDisposable
         }
 
         return ok;
+    }
+
+    /// <summary>
+    /// GET /proxies/{节点} → 这一个节点对**每个**测速网站的延迟。
+    /// 内核按网站分开存（extra["https://www.youtube.com"].history），所以能一次全取出来。
+    /// </summary>
+    public async Task<Dictionary<string, int>> GetNodeSiteDelaysAsync(
+        string nodeName, IReadOnlyList<string> urls, CancellationToken ct)
+    {
+        var result = new Dictionary<string, int>(StringComparer.Ordinal);
+        if (string.IsNullOrWhiteSpace(nodeName) || urls.Count == 0) return result;
+
+        using var doc = await SendAsync(
+            HttpMethod.Get, "/proxies/" + Uri.EscapeDataString(nodeName), null, ct).ConfigureAwait(false);
+
+        foreach (var url in urls)
+        {
+            var delay = LastDelayOf(doc.RootElement, url);
+            if (delay >= 0) result[url] = delay;
+        }
+
+        return result;
     }
 
     /// <summary>GET /proxies/{节点}/delay —— 给单个节点测速（切完节点顺手测一下）。</summary>

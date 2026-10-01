@@ -44,6 +44,9 @@ internal static class ClashFormat
     /// <summary>延迟文字；没有数据时是「--」。</summary>
     public static string Delay(int ms) => ms >= 0 ? $"{ms} ms" : "--";
 
+    /// <summary>只要数字（延迟胶囊里用，和 Clash Verge 的显示一致）。</summary>
+    public static string DelayShort(int ms) => ms >= 0 ? ms.ToString() : "--";
+
     /// <summary>延迟配色：绿 / 黄 / 红。这两套色在浅色和深色岛体上都读得清。</summary>
     public static Windows.UI.Color DelayColor(int ms) => ms switch
     {
