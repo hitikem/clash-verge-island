@@ -22,9 +22,10 @@ public sealed class ClashIslandView : UserControl, IMorphView
 {
     private const double CompactIconSize = 16;
     private const double ExpandedIconSize = 22;
-    private const double CompactFlagHeight = 12;
-    private const double ExpandedFlagHeight = 16;
-    private const double FlagWidth = 17;
+    private const double CompactFlagWidth = 19;
+    private const double CompactFlagHeight = 13;
+    private const double ExpandedFlagWidth = 26;
+    private const double ExpandedFlagHeight = 18;
     private const double CompactBadgeSize = 10;
     private const double ExpandedBadgeSize = 12;
     private const double CompactTitleSize = 13;
@@ -59,9 +60,23 @@ public sealed class ClashIslandView : UserControl, IMorphView
     private readonly IIslandTheme _theme;
     private readonly FontIcon _icon;
 
-    /// <summary>真国旗图片（认得出地区、且插件里有对应 PNG 时显示）。</summary>
-    private readonly Image _flagImage = new();
-    private readonly Border _flagBorder;
+    /// <summary>
+    /// 真国旗（认得出地区、且插件里有对应 PNG 时显示）。
+    ///
+    /// 渲染方式很关键：用 Border + ImageBrush(UniformToFill)，而不是 Image + 白框。
+    ///   · 各国国旗长宽比不一样（瑞士 1:1、尼泊尔 1:1.2、多数 3:2），
+    ///     用 Uniform 放进固定框一定会留白边，看着就像糊了一层白框；
+    ///     UniformToFill 让图填满整格、超出的部分裁掉，所有国旗形状统一。
+    ///   · Border 会把背景裁到 CornerRadius，所以圆角也是白送的。
+    /// </summary>
+    private readonly Border _flagVisual = new()
+    {
+        CornerRadius = new CornerRadius(3),
+        VerticalAlignment = VerticalAlignment.Center,
+        Opacity = 0,          // 认出地区且找得到国旗时才显示
+    };
+
+    private readonly ImageBrush _flagBrush = new() { Stretch = Stretch.UniformToFill };
     private readonly SolidColorBrush _flagEdgeBrush = new();
 
     /// <summary>国旗图片库（和聚光卡共用同一份缓存）。</summary>
@@ -134,21 +149,10 @@ public sealed class ClashIslandView : UserControl, IMorphView
             Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x4C, 0xC2, 0xFF)),
         };
 
-        // 真国旗：外面套一圈很淡的描边，否则日本这种「白底旗」在浅色岛上会看不见
-        _flagImage.Height = CompactFlagHeight;
-        _flagImage.Stretch = Stretch.Uniform;
-        _flagImage.VerticalAlignment = VerticalAlignment.Center;
-        _flagBorder = new Border
-        {
-            Width = FlagWidth,                  // 定宽：所有国旗占一样宽，节点名左边缘才对得齐
-            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 255, 255, 255)),
-            BorderBrush = _flagEdgeBrush,
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(2),
-            VerticalAlignment = VerticalAlignment.Center,
-            Child = _flagImage,
-            Opacity = 0,          // 认出地区且找得到国旗时才显示
-        };
+        // 真国旗：Border 背景填满 + 圆角裁切，不留白边、不加白框
+        _flagVisual.Background = _flagBrush;
+        _flagVisual.Width = CompactFlagWidth;
+        _flagVisual.Height = CompactFlagHeight;
 
         // 缺国旗图时的退路：带国家色的小徽章
         _badgeBrush.Color = ClashFormat.RegionColor("");
@@ -207,7 +211,7 @@ public sealed class ClashIslandView : UserControl, IMorphView
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 0, 2, 0),
         };
-        iconHost.Children.Add(_flagBorder);
+        iconHost.Children.Add(_flagVisual);
         iconHost.Children.Add(_badge);
         iconHost.Children.Add(_icon);
 
@@ -431,8 +435,8 @@ public sealed class ClashIslandView : UserControl, IMorphView
             var flag = _flags.Get(code);
             if (flag is not null)
             {
-                _flagImage.Source = flag;
-                _flagBorder.Opacity = 1;
+                _flagBrush.ImageSource = flag;
+                _flagVisual.Opacity = 1;
                 _badge.Opacity = 0;
                 _icon.Opacity = 0;
                 return;
@@ -441,12 +445,12 @@ public sealed class ClashIslandView : UserControl, IMorphView
             _codeText.Text = code;
             _badgeBrush.Color = ClashFormat.RegionColor(code);
             _badge.Opacity = 1;
-            _flagBorder.Opacity = 0;
+            _flagVisual.Opacity = 0;
             _icon.Opacity = 0;
             return;
         }
 
-        _flagBorder.Opacity = 0;
+        _flagVisual.Opacity = 0;
         _badge.Opacity = 0;
         _icon.Opacity = 1;
     }
@@ -464,7 +468,7 @@ public sealed class ClashIslandView : UserControl, IMorphView
     {
         _theme.Changed -= ApplyThemeColors;
         _morphTimer?.Stop();
-        _flagImage.Source = null;
+        _flagBrush.ImageSource = null;
     }
 
     /// <summary>中性色：岛体深色时是白色系，浅色（Fluent + 浅色系统）时是黑色系。</summary>
@@ -533,7 +537,8 @@ public sealed class ClashIslandView : UserControl, IMorphView
         _detail.Opacity = Math.Clamp(progress, 0, 1);
 
         _icon.FontSize = CompactIconSize + (ExpandedIconSize - CompactIconSize) * progress;
-        _flagImage.Height = CompactFlagHeight + (ExpandedFlagHeight - CompactFlagHeight) * progress;
+        _flagVisual.Width = CompactFlagWidth + (ExpandedFlagWidth - CompactFlagWidth) * progress;
+        _flagVisual.Height = CompactFlagHeight + (ExpandedFlagHeight - CompactFlagHeight) * progress;
         _codeText.FontSize = CompactBadgeSize + (ExpandedBadgeSize - CompactBadgeSize) * progress;
         _title.FontSize = CompactTitleSize + (ExpandedTitleSize - CompactTitleSize) * progress;
         _title.Width = CompactTitleMaxWidth + (ExpandedTitleMaxWidth - CompactTitleMaxWidth) * progress;

@@ -44,10 +44,49 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
     private double _upSmooth = -1;
     private double _downSmooth = -1;
 
+    /// <summary>上一次自动测速的时间（"自动测速"关掉时用不到）。</summary>
+    private DateTimeOffset _lastAutoTest = DateTimeOffset.MinValue;
+
     private bool _stopped;
 
     /// <summary>聚光卡当前选中的分组（用户手动选过就记住）。</summary>
     public string SpotlightGroup { get; private set; } = "";
+
+    /// <summary>节点列表要不要按延迟从快到慢排。默认关：开着的时候测速会让行不停跳动。</summary>
+    public bool SortByDelay => Settings.Get("sort", false);
+
+    /// <summary>记住"按延迟排序"这个开关。</summary>
+    public void SetSortByDelay(bool value)
+    {
+        if (Settings.Get("sort", false) == value) return;
+        Settings.Set("sort", value);
+    }
+
+    // ---- 测速网站（和 Clash Verge 界面上那套一致：Apple / GitHub / Google / YouTube）----
+
+    /// <summary>Clash Verge 里配置的测速网站，启动时从它的 verge.yaml 读一次。</summary>
+    private List<ClashTestTargets.Target> _targets = new();
+
+    public IReadOnlyList<ClashTestTargets.Target> Targets => _targets;
+
+    public string SelectedTargetName => Settings.Get("target", "GitHub");
+
+    /// <summary>当前选中网站的测速地址；没读到配置就退回第一个。</summary>
+    private string SelectedTargetUrl =>
+        _targets.FirstOrDefault(t => string.Equals(t.Name, SelectedTargetName, StringComparison.Ordinal))?.Url
+        ?? _targets.FirstOrDefault()?.Url
+        ?? "";
+
+    /// <summary>切换测速网站：换完之后立刻按新网站重新读一遍延迟。</summary>
+    public void SetTarget(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return;
+        if (string.Equals(name, SelectedTargetName, StringComparison.Ordinal)) return;
+
+        Settings.Set("target", name);
+        _tick = 0;                      // 强制下一轮重拉策略组
+        _ = RefreshAsync($"测速网站 → {name}");
+    }
 
     /// <summary>岛体当前是否浅色（聚光卡配色要用）。</summary>
     public bool ThemeIsLight => Theme.IsLight;
@@ -57,6 +96,8 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         Log.Info($"启动：{Manifest.Id} {Manifest.Version}，插件目录 {PluginDirectory}");
 
         _flags = new FlagLibrary(PluginDirectory);
+        _targets = ClashTestTargets.Load();
+        Log.Info($"测速网站（{_targets.Count} 个）：{string.Join("、", _targets.Select(t => t.Name))}，当前用 {SelectedTargetName}");
         _view = new ClashIslandView(Manifest, Theme, _flags);
 
         _content = new IslandLiveContent
@@ -151,6 +192,9 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
                     Log.Warn($"界面刷新失败（已忽略）：{ex.Message}");
                 }
             });
+
+            // 到点了就整组测一次速（设置里可以关掉）
+            await MaybeAutoTestAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -216,7 +260,7 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
             _tick++;
             if (_tick % 3 == 1 || _groups.Count == 0)
             {
-                _groups = await _api.GetGroupsAsync(ct).ConfigureAwait(false);
+                _groups = await _api.GetGroupsAsync(SelectedTargetUrl, ct).ConfigureAwait(false);
             }
             snapshot.Groups = _groups;
 
@@ -269,6 +313,43 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         return groups.FirstOrDefault(g => g.Type == "Selector" && g.Name != "GLOBAL")
                ?? groups.FirstOrDefault(g => g.Name != "GLOBAL")
                ?? groups.FirstOrDefault();
+    }
+
+    /// <summary>当前该用哪个测速地址：优先用户选的网站，没配就退回策略组自带的。</summary>
+    private string TestUrlFor(string group)
+    {
+        var url = SelectedTargetUrl;
+        if (!string.IsNullOrWhiteSpace(url)) return url;
+        return _groups.FirstOrDefault(g => g.Name == group)?.TestUrl ?? "";
+    }
+
+    /// <summary>按设置里的间隔自动整组测速（0 = 关闭）。</summary>
+    private async Task MaybeAutoTestAsync()
+    {
+        var minutes = Settings.Get("autotest", 0);
+        if (minutes <= 0 || !_snapshot.Connected) return;
+
+        if (_lastAutoTest != DateTimeOffset.MinValue &&
+            DateTimeOffset.UtcNow - _lastAutoTest < TimeSpan.FromMinutes(minutes))
+        {
+            return;
+        }
+
+        var group = PickGroup(_groups, _snapshot.Mode);
+        if (group is null) return;
+
+        _lastAutoTest = DateTimeOffset.UtcNow;
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+            var ok = await _api.TestGroupAsync(group.Name, TestUrlFor(group.Name), cts.Token).ConfigureAwait(false);
+            Log.Info($"自动测速完成：{group.Name}（网站 {SelectedTargetName}），{ok} 个节点有结果");
+            _tick = 0;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"自动测速失败（已忽略）：{ex.Message}");
+        }
     }
 
     /// <summary>把异常翻译成用户看得懂的一句话。</summary>
@@ -327,9 +408,8 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
             // 顺手测一下新节点的延迟，否则界面上还挂着上一个节点的数字，看着像没切成功
             try
             {
-                var testUrl = _groups.FirstOrDefault(g => g.Name == group)?.TestUrl ?? "";
                 using var testCts = new CancellationTokenSource(TimeSpan.FromSeconds(7));
-                var delay = await _api.TestNodeAsync(node, testUrl, testCts.Token).ConfigureAwait(false);
+                var delay = await _api.TestNodeAsync(node, TestUrlFor(group), testCts.Token).ConfigureAwait(false);
                 Log.Info($"新节点测速：{node} → {delay} ms");
             }
             catch (Exception ex)
@@ -408,9 +488,8 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
                 Duration = TimeSpan.FromSeconds(2),
             }));
 
-            // 用策略组自己配的测速地址（用它才知道这个组是按什么标准算延迟的）
-            var testUrl = _groups.FirstOrDefault(g => g.Name == group)?.TestUrl ?? "";
-            await _api.TestGroupAsync(group, testUrl, CancellationToken.None).ConfigureAwait(false);
+            // 用当前选中的测速网站 —— 和 Clash Verge 界面里「选网站测延迟」是同一回事
+            await _api.TestGroupAsync(group, TestUrlFor(group), CancellationToken.None).ConfigureAwait(false);
 
             _tick = 0;
             await RefreshAsync($"测速完成 → {group}").ConfigureAwait(false);
@@ -478,6 +557,29 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
             Password = Settings.Get("secret", ""),
             PlaceholderText = "在 Clash Verge 里设置的那个密码",
             MinWidth = 260,
+        };
+
+        // 测速网站：和 Clash Verge 界面上那套一致
+        var targetBox = new ComboBox { Header = "测速网站", MinWidth = 180 };
+        foreach (var target in _targets) targetBox.Items.Add(target.Name);
+        var targetIndex = _targets.FindIndex(t => t.Name == SelectedTargetName);
+        targetBox.SelectedIndex = targetIndex >= 0 ? targetIndex : 0;
+        targetBox.SelectionChanged += (_, _) =>
+        {
+            if (targetBox.SelectedItem is string name) SetTarget(name);
+        };
+
+        // 自动测速间隔：0 = 关闭
+        var autoTestBox = new ComboBox { Header = "自动测速", MinWidth = 180 };
+        autoTestBox.Items.Add("关闭");
+        autoTestBox.Items.Add("每 5 分钟");
+        autoTestBox.Items.Add("每 15 分钟");
+        autoTestBox.Items.Add("每 30 分钟");
+        autoTestBox.SelectedIndex = Settings.Get("autotest", 0) switch { 5 => 1, 15 => 2, 30 => 3, _ => 0 };
+        autoTestBox.SelectionChanged += (_, _) =>
+        {
+            var minutes = autoTestBox.SelectedIndex switch { 1 => 5, 2 => 15, 3 => 30, _ => 0 };
+            if (Settings.Get("autotest", 0) != minutes) Settings.Set("autotest", minutes);
         };
 
         var status = new TextBlock { TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = 0.75 };
@@ -551,7 +653,7 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         panel.Children.Add(new Border
         {
             Style = (Style)Application.Current.Resources["SettingsCardStyle"],
-            Child = new StackPanel { Spacing = 8, Children = { hostBox, portBox, secretBox, actions, status } },
+            Child = new StackPanel { Spacing = 8, Children = { hostBox, portBox, secretBox, targetBox, autoTestBox, actions, status } },
         });
 
         var messageButton = new Button { Content = "发一条测试消息" };

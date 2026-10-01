@@ -1,6 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
 using WinIsland.Core;
 
 namespace ClashVergeIsland;
@@ -57,17 +58,20 @@ public sealed class ClashIslandSpotlightView : UserControl
     private readonly Dictionary<string, TextBlock> _rowTitles = new(StringComparer.Ordinal);
 
     private readonly List<Button> _modeButtons = new();
+    private readonly Dictionary<string, Button> _targetButtons = new(StringComparer.Ordinal);
 
     private readonly FlagLibrary _flags;
     private readonly TextBox _search = new() { PlaceholderText = "搜索节点…", MinWidth = 180 };
 
     /// <summary>卡片左上角的大国旗，跟着当前节点变。</summary>
+    private const double HeaderFlagWidth = 34;
+    private const double HeaderFlagHeight = 23;
+
     private readonly Border _headerFlag = new()
     {
-        Width = 28,
-        Height = 19,
-        CornerRadius = new CornerRadius(3),
-        BorderThickness = new Thickness(1),
+        Width = HeaderFlagWidth,
+        Height = HeaderFlagHeight,
+        CornerRadius = new CornerRadius(4),
         VerticalAlignment = VerticalAlignment.Center,
         Opacity = 0,
     };
@@ -158,6 +162,41 @@ public sealed class ClashIslandSpotlightView : UserControl
             _plugin.SetSpotlightGroup(_groupBox.SelectedItem as string ?? "");
         };
 
+        // 测速网站：和 Clash Verge 界面里那套一致（Apple / GitHub / Google / YouTube）
+        var targetRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        targetRow.Children.Add(new TextBlock
+        {
+            Text = "测速",
+            FontSize = 13,
+            Width = 44,
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = _mutedBrush,
+        });
+        foreach (var target in _plugin.Targets)
+        {
+            var button = new Button
+            {
+                Content = target.Name,
+                Tag = target.Name,
+                FontSize = 12,
+                Padding = new Thickness(10, 4, 10, 4),
+            };
+            button.Click += (_, _) => _plugin.SetTarget(target.Name);
+            _targetButtons[target.Name] = button;
+            targetRow.Children.Add(button);
+        }
+
+        var sort = new CheckBox
+        {
+            Content = "按延迟排序",
+            IsChecked = _plugin.SortByDelay,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(8, 0, 0, 0),
+        };
+        sort.Checked += (_, _) => { _plugin.SetSortByDelay(true); _builtSignature = ""; };
+        sort.Unchecked += (_, _) => { _plugin.SetSortByDelay(false); _builtSignature = ""; };
+        targetRow.Children.Add(sort);
+
         var scroller = new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
@@ -186,6 +225,7 @@ public sealed class ClashIslandSpotlightView : UserControl
         root.Children.Add(new StackPanel { Spacing = 2, Children = { _modeLine, _speedLine } });
         root.Children.Add(modeRow);
         root.Children.Add(groupRow);
+        root.Children.Add(targetRow);
         root.Children.Add(scroller);
         root.Children.Add(_hint);
 
@@ -239,6 +279,7 @@ public sealed class ClashIslandSpotlightView : UserControl
                        $"{ClashFormat.CleanNodeKeepRegion(snapshot.ActiveNode)} · " +
                        $"延迟 {ClashFormat.Delay(snapshot.ActiveDelay)}";
         ApplyHeaderFlag(snapshot.ActiveNode);
+        RefreshTargetButtons();
         _modeLine.Text = $"模式：{ClashFormat.Mode(snapshot.Mode)}    分组：{snapshot.ActiveGroup}";
         _speedLine.Text = $"实时网速：↑ {ClashFormat.Speed(snapshot.UpPerSec)}    ↓ {ClashFormat.Speed(snapshot.DownPerSec)}";
         _hint.Text = "点任意节点即可切换；绿色为延迟低，红色为延迟高或不可用。";
@@ -291,6 +332,12 @@ public sealed class ClashIslandSpotlightView : UserControl
         var filtered = string.IsNullOrEmpty(_filter)
             ? group.Nodes
             : group.Nodes.Where(n => n.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase)).ToList();
+
+        // 按延迟从快到慢排（没测过的排最后），让"哪个节点快"一眼可见
+        if (_plugin.SortByDelay)
+        {
+            filtered = filtered.OrderBy(n => n.Delay < 0 ? int.MaxValue : n.Delay).ToList();
+        }
 
         var visible = filtered.Take(MaxNodes).ToList();
         var signature = group.Name + "#" + _filter + "#" + string.Join(",", visible.Select(n => n.Name));
@@ -410,6 +457,32 @@ public sealed class ClashIslandSpotlightView : UserControl
         return button;
     }
 
+    /// <summary>把「当前选中的测速网站」那颗按钮点亮。</summary>
+    private void RefreshTargetButtons()
+    {
+        foreach (var (name, button) in _targetButtons)
+        {
+            var selected = string.Equals(name, _plugin.SelectedTargetName, StringComparison.Ordinal);
+            button.Background = selected ? _selectedRowBrush : _rowBrush;
+            button.FontWeight = selected
+                ? Microsoft.UI.Text.FontWeights.SemiBold
+                : Microsoft.UI.Text.FontWeights.Normal;
+        }
+    }
+
+    /// <summary>
+    /// 把国旗画成填满整格 + 圆角：Border 背景用 ImageBrush(UniformToFill)。
+    /// 不能用 Image + Uniform 配白框：各国长宽比不同，一定留白边，看着像糊了一层白框。
+    /// </summary>
+    private static Border MakeFlagVisual(BitmapImage source, double width, double height) => new()
+    {
+        Width = width,
+        Height = height,
+        CornerRadius = new CornerRadius(3),
+        VerticalAlignment = VerticalAlignment.Center,
+        Background = new ImageBrush { ImageSource = source, Stretch = Stretch.UniformToFill },
+    };
+
     /// <summary>卡片左上角的大国旗。只在地区真的变了才重建，别每 2 秒造一堆控件。</summary>
     private void ApplyHeaderFlag(string nodeName)
     {
@@ -429,11 +502,13 @@ public sealed class ClashIslandSpotlightView : UserControl
         var flag = _flags.Get(code);
         if (flag is not null)
         {
-            _headerFlag.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 255, 255, 255));
-            _headerFlag.Child = new Image { Source = flag, Stretch = Stretch.Uniform };
+            _headerFlag.BorderThickness = new Thickness(0);
+            _headerFlag.Child = null;
+            _headerFlag.Background = new ImageBrush { ImageSource = flag, Stretch = Stretch.UniformToFill };
         }
         else
         {
+            _headerFlag.BorderThickness = new Thickness(0);
             _headerFlag.Background = new SolidColorBrush(ClashFormat.RegionColor(code));
             _headerFlag.Child = new TextBlock
             {
@@ -464,18 +539,9 @@ public sealed class ClashIslandSpotlightView : UserControl
 
         if (flag is not null)
         {
-            return new Border
-            {
-                Width = width,
-                Height = height,
-                Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 255, 255, 255)),
-                BorderBrush = _flagEdgeBrush,
-                BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(2),
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = margin,
-                Child = new Image { Source = flag, Stretch = Stretch.Uniform },
-            };
+            var visual = MakeFlagVisual(flag, width, height);
+            visual.Margin = margin;
+            return visual;
         }
 
         if (!string.IsNullOrEmpty(code))

@@ -184,8 +184,14 @@ internal sealed class ClashVergeApi : IDisposable
         return new ClashTraffic(up, down, count);
     }
 
-    /// <summary>GET /proxies → 所有策略组及其节点、当前选择、最近延迟。</summary>
-    public async Task<List<ClashGroup>> GetGroupsAsync(CancellationToken ct)
+    /// <summary>
+    /// GET /proxies → 所有策略组及其节点、当前选择、延迟。
+    ///
+    /// <paramref name="testUrl"/> 是当前选中的测速网站：内核把不同网站的测速结果
+    /// 分开存在每个节点的 extra 里（extra["https://www.youtube.com"].history），
+    /// 所以要看哪个网站的延迟就得按那个网址去取；取不到才退回默认测速的 history。
+    /// </summary>
+    public async Task<List<ClashGroup>> GetGroupsAsync(string testUrl, CancellationToken ct)
     {
         using var doc = await SendAsync(HttpMethod.Get, "/proxies", null, ct).ConfigureAwait(false);
         if (!doc.RootElement.TryGetProperty("proxies", out var proxies) ||
@@ -194,9 +200,10 @@ internal sealed class ClashVergeApi : IDisposable
             return new List<ClashGroup>();
         }
 
-        // 先把每个代理的「类型」「最近延迟」「是否可用」收集起来，组里的节点要按名字回查
+        // 先把每个代理的「类型」「是否可用」「默认延迟」「指定网站的延迟」收集起来
         var types = new Dictionary<string, string>(StringComparer.Ordinal);
         var delays = new Dictionary<string, int>(StringComparer.Ordinal);
+        var urlDelays = new Dictionary<string, int>(StringComparer.Ordinal);
         var alive = new Dictionary<string, bool>(StringComparer.Ordinal);
 
         foreach (var property in proxies.EnumerateObject())
@@ -206,14 +213,13 @@ internal sealed class ClashVergeApi : IDisposable
             alive[property.Name] =
                 !(property.Value.TryGetProperty("alive", out var a) && a.ValueKind == JsonValueKind.False);
 
-            if (property.Value.TryGetProperty("history", out var history) &&
-                history.ValueKind == JsonValueKind.Array && history.GetArrayLength() > 0)
+            var fromHistory = LastDelay(property.Value, "history");
+            if (fromHistory >= 0) delays[property.Name] = fromHistory;
+
+            if (!string.IsNullOrWhiteSpace(testUrl))
             {
-                var last = history[history.GetArrayLength() - 1];
-                if (last.TryGetProperty("delay", out var delay) && delay.TryGetInt32(out var ms))
-                {
-                    delays[property.Name] = ms;
-                }
+                var fromUrl = LastDelayOf(property.Value, testUrl);
+                if (fromUrl >= 0) urlDelays[property.Name] = fromUrl;
             }
         }
 
@@ -243,7 +249,10 @@ internal sealed class ClashVergeApi : IDisposable
                 {
                     Name = name,
                     Type = types.TryGetValue(name, out var t) ? t : "",
-                    Delay = delays.TryGetValue(name, out var ms) ? ms : -1,
+                    // 优先用「当前选中网站」测出来的结果；那个网站还没测过才退回默认延迟
+                    Delay = urlDelays.TryGetValue(name, out var byUrl)
+                        ? byUrl
+                        : delays.TryGetValue(name, out var byDefault) ? byDefault : -1,
                     Alive = !alive.TryGetValue(name, out var av) || av,
                 });
             }
@@ -258,6 +267,35 @@ internal sealed class ClashVergeApi : IDisposable
         element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString() ?? ""
             : "";
+
+    /// <summary>读 element["history"] 里最后一条的 delay；没有就是 -1。</summary>
+    private static int LastDelay(JsonElement element, string historyName)
+    {
+        if (!element.TryGetProperty(historyName, out var history) ||
+            history.ValueKind != JsonValueKind.Array || history.GetArrayLength() == 0)
+        {
+            return -1;
+        }
+
+        var last = history[history.GetArrayLength() - 1];
+        return last.TryGetProperty("delay", out var delay) && delay.TryGetInt32(out var ms) ? ms : -1;
+    }
+
+    /// <summary>读 element["extra"][url]["history"] 里最后一条的 delay。</summary>
+    private static int LastDelayOf(JsonElement element, string url)
+    {
+        if (!element.TryGetProperty("extra", out var extra) || extra.ValueKind != JsonValueKind.Object)
+        {
+            return -1;
+        }
+
+        if (!extra.TryGetProperty(url, out var entry) || entry.ValueKind != JsonValueKind.Object)
+        {
+            return -1;
+        }
+
+        return LastDelay(entry, "history");
+    }
 
     /// <summary>PUT /proxies/{组} —— 切换该策略组选中的节点。</summary>
     public Task SelectNodeAsync(string group, string node, CancellationToken ct) =>
