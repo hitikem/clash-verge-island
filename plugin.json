@@ -1,0 +1,13 @@
+{
+  "id": "clash-verge-island",
+  "name": "Clash 小岛",
+  "version": "1.0.0",
+  "entry_dll": "ClashVergeIsland.dll",
+  "api_version": 2,
+  "min_host_version": "2.3.0",
+  "description": "小岛显示 Clash Verge 当前节点和延迟，展开看模式和实时网速，点一下弹出大卡片：切节点、切模式、测延迟。需要在 Clash Verge 里打开「外部控制」。",
+  "author": "hit",
+  "icon_glyph": "\uE774",
+  "license": "MIT",
+  "tags": ["clash", "proxy", "network", "verge"]
+}
