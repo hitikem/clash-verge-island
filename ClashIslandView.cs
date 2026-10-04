@@ -30,7 +30,7 @@ public sealed class ClashIslandView : UserControl, IMorphView
     private const double ExpandedBadgeSize = 12;
     private const double CompactTitleSize = 13;
     private const double ExpandedTitleSize = 15;
-    private const double ExpandedDetailHeight = 96;
+    private const double ExpandedDetailHeight = 128;
 
     /// <summary>
     /// 标题和延迟都给一个宽度上限。
@@ -79,6 +79,24 @@ public sealed class ClashIslandView : UserControl, IMorphView
     private readonly ImageBrush _flagBrush = new() { Stretch = Stretch.UniformToFill };
     private readonly SolidColorBrush _flagEdgeBrush = new();
 
+    /// <summary>
+    /// 自绘的岛体药丸：盖住宿主画的那个黑色胶囊。
+    /// 宿主不给材质接口（IslandLiveContent 只有 Priority / 视图 / 尺寸），
+    /// 所以只能自己画一个圆角块压在它上面 —— 这样岛体才有了颜色和透明度。
+    /// </summary>
+    private readonly Border _pill;
+    private readonly LinearGradientBrush _pillBrush;
+    private readonly GradientStop _pillStopTop = new() { Offset = 0.0 };
+    private readonly GradientStop _pillStopMid = new() { Offset = 0.55 };
+    private readonly GradientStop _pillStopBottom = new() { Offset = 1.0 };
+    private readonly SolidColorBrush _pillEdgeBrush = new();
+
+    /// <summary>药丸比内容宽这么多：正好盖住宿主胶囊（实测胶囊比内容宽约 4px）。</summary>
+    private const double PillBleed = 4;
+
+    private const double PillRadiusCompact = 20;
+    private const double PillRadiusExpanded = 24;
+
     /// <summary>国旗图片库（和聚光卡共用同一份缓存）。</summary>
     private readonly FlagLibrary _flags;
 
@@ -94,9 +112,13 @@ public sealed class ClashIslandView : UserControl, IMorphView
     private readonly StackPanel _detail;
 
     /// <summary>展开态第一行：模式胶囊 + 彩色上下行速度。</summary>
-    private readonly Border _modeChip;
-    private readonly TextBlock _modeText;
     private readonly SolidColorBrush _modeChipBrush = new();
+
+    /// <summary>未选中的模式芯片底色（很淡，选中那个才亮）。</summary>
+    private readonly SolidColorBrush _chipIdleBrush = new();
+
+    /// <summary>岛上那三个模式小芯片（规则 / 全局 / 直连）。</summary>
+    private readonly List<(string Mode, Button Chip)> _modeChips;
     private readonly TextBlock _speedUp;
     private readonly TextBlock _speedDown;
     private readonly SolidColorBrush _upBrush = new();
@@ -132,6 +154,9 @@ public sealed class ClashIslandView : UserControl, IMorphView
     private readonly SolidColorBrush _mutedBrush = new();
     private readonly SolidColorBrush _faintBrush = new();
 
+    /// <summary>外观（颜色 / 透明度 / 岛体自绘开关）都问插件要 —— 岛体和卡片共用一套。</summary>
+    private readonly ClashVergeIslandPlugin _plugin;
+
     /// <summary>延迟那行自己的画刷（按绿/黄/红变色，不跟主题走）。</summary>
     private readonly SolidColorBrush _delayBrush = new();
 
@@ -148,8 +173,9 @@ public sealed class ClashIslandView : UserControl, IMorphView
     private string _shortName = "Clash 小岛";
     private string _fullName = "Clash 小岛";
 
-    public ClashIslandView(PluginManifest manifest, IIslandTheme theme, FlagLibrary flags)
+    public ClashIslandView(PluginManifest manifest, IIslandTheme theme, FlagLibrary flags, ClashVergeIslandPlugin plugin)
     {
+        _plugin = plugin;
         _theme = theme;
         _flags = flags;
         ApplyThemeColors();
@@ -246,23 +272,37 @@ public sealed class ClashIslandView : UserControl, IMorphView
 
         // ---- 展开态的内容：三行，全部常驻可视树，靠 Height/Opacity 收起 ----
 
-        // 第一行：模式胶囊 + 上下行速度
-        _modeText = new TextBlock
+        // 第一行：模式（可点）+ 上下行速度
+        //
+        // 原来这里是一个只读的「全局」胶囊。现在把它换成三个可点的小芯片 ——
+        // **位置一点没动**，只是让"模式指示器"变成"模式控制器"：
+        // 左边还是它、右边还是上下行速度，前后关系保持原样，不会显得挤或者空。
+        _modeChips = new List<(string Mode, Button Chip)>();
+        foreach (var (mode, label) in new[] { ("rule", "规则"), ("global", "全局"), ("direct", "直连") })
         {
-            Text = "规则",
-            FontSize = 11,
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            VerticalAlignment = VerticalAlignment.Center,
-            Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 255, 255, 255)),
-        };
-        _modeChip = new Border
-        {
-            Background = _modeChipBrush,
-            CornerRadius = new CornerRadius(8),
-            Padding = new Thickness(7, 1, 7, 1),
-            VerticalAlignment = VerticalAlignment.Center,
-            Child = _modeText,
-        };
+            var chip = new Button
+            {
+                Content = new TextBlock
+                {
+                    Text = label,
+                    FontSize = 11,
+                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                    Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 255, 255, 255)),
+                },
+                Padding = new Thickness(7, 1, 7, 1),
+                CornerRadius = new CornerRadius(8),
+                BorderThickness = new Thickness(0),
+                MinWidth = 0,
+                MinHeight = 0,
+                Margin = new Thickness(0, 0, 4, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Background = _chipIdleBrush,
+            };
+
+            var captured = mode;
+            chip.Click += async (_, _) => await _plugin.SetModeAsync(captured);
+            _modeChips.Add((mode, chip));
+        }
 
         _upBrush.Color = Windows.UI.Color.FromArgb(255, 0xFF, 0xB4, 0x54);
         _downBrush.Color = Windows.UI.Color.FromArgb(255, 0x4C, 0xC2, 0xFF);
@@ -288,7 +328,7 @@ public sealed class ClashIslandView : UserControl, IMorphView
             Spacing = 8,
             VerticalAlignment = VerticalAlignment.Center,
         };
-        speedRow.Children.Add(_modeChip);
+        foreach (var (_, chip) in _modeChips) speedRow.Children.Add(chip);
         speedRow.Children.Add(_speedUp);
         speedRow.Children.Add(_speedDown);
 
@@ -315,6 +355,25 @@ public sealed class ClashIslandView : UserControl, IMorphView
         _detail.Children.Add(_sub);
         _detail.Children.Add(_siteRow);
 
+        // 岛上直接操作：不用点开卡片就能换节点 / 切最快 / 立刻测速。
+        // 宿主会顺着可视树上溯识别 ButtonBase，所以这里的按钮不会被当成"点了岛体"。
+        // 一排塞下全部操作：短标签 + 紧凑内边距。
+        // 分两排会让岛"变胖"，而灵动岛的美感靠的是扁、宽、克制。
+        var controlRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 3 };
+        controlRow.Children.Add(MakeIslandButton("◀", () => _plugin.SwitchNodeRelativeAsync(-1), 34));
+        controlRow.Children.Add(MakeIslandButton("▶", () => _plugin.SwitchNodeRelativeAsync(1), 34));
+        controlRow.Children.Add(MakeIslandButton("最快", () => _plugin.SwitchToFastestAsync()));
+        controlRow.Children.Add(MakeIslandButton("测速", () => _plugin.RefreshNowAsync("岛上立即测速")));
+        controlRow.Children.Add(MakeIslandButton("视频", () => _plugin.SwitchBySceneAsync("video")));
+        controlRow.Children.Add(MakeIslandButton("游戏", () => _plugin.SwitchBySceneAsync("game")));
+        controlRow.Children.Add(MakeIslandButton("下载", () => _plugin.SwitchBySceneAsync("download")));
+        controlRow.Children.Add(MakeIslandButton("订阅", async () =>
+        {
+            await _plugin.UpdateSubscriptionsAsync();
+        }));
+        controlRow.Children.Add(MakeIslandButton("IP", () => _plugin.RefreshExitNowAsync()));
+        _detail.Children.Add(controlRow);
+
         _root = new StackPanel
         {
             Width = CompactContentWidth,
@@ -326,7 +385,35 @@ public sealed class ClashIslandView : UserControl, IMorphView
         _root.Children.Add(header);
         _root.Children.Add(_detail);
 
-        Content = _root;
+        // 药丸的底做成上下渐变：平涂一层灰最丑，有明暗才像一块材料
+        _pillBrush = new LinearGradientBrush
+        {
+            StartPoint = new Windows.Foundation.Point(0, 0),
+            EndPoint = new Windows.Foundation.Point(0, 1),
+            GradientStops = { _pillStopTop, _pillStopMid, _pillStopBottom },
+        };
+
+        _pill = new Border
+        {
+            // 宽度**绝对不要写死**：宿主会把内容拉伸到"所有活动里最大的展开宽度"，
+            // 写死成 400 时，超出 400 的那截就露出宿主的黑胶囊 —— 这就是"没铺满"。
+            // 交给 Stretch，让它铺满宿主给的整个内容框。
+            MinWidth = CompactContentWidth + PillBleed,
+            Background = _pillBrush,
+            BorderBrush = _pillEdgeBrush,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(PillRadiusCompact),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            // 高度同理：也要铺满，不能按内容自适应
+            VerticalAlignment = VerticalAlignment.Stretch,
+            Child = _root,
+        };
+
+        Content = _pill;
+
+        // 文字清晰度：岛体现在是半透明玻璃，细体字压在会变化的背景上会发虚。
+        // 统一提到 SemiBold 是最直接的可读性补救（比调颜色有效得多）。
+        Loaded += (_, _) => EmboldenAll(_pill);
 
         _morphTimer = DispatcherQueue?.CreateTimer();
         if (_morphTimer is not null)
@@ -341,6 +428,48 @@ public sealed class ClashIslandView : UserControl, IMorphView
 
     public UIElement View => this;
 
+    /// <summary>把当前模式那个芯片点亮（用户设了强调色就用强调色）。</summary>
+    private void HighlightMode(string mode)
+    {
+        _modeChipBrush.Color = _plugin.AccentColor ?? ClashFormat.ModeColor(mode);
+
+        foreach (var (m, chip) in _modeChips)
+        {
+            chip.Background = string.Equals(m, mode, StringComparison.OrdinalIgnoreCase)
+                ? _modeChipBrush
+                : _chipIdleBrush;
+        }
+    }
+
+    /// <summary>把可视树里所有文字提到 SemiBold（半透明底上细体字会发虚）。</summary>
+    private static void EmboldenAll(DependencyObject root)
+    {
+        var count = VisualTreeHelper.GetChildrenCount(root);
+        for (var i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is TextBlock text) text.FontWeight = Microsoft.UI.Text.FontWeights.SemiBold;
+            EmboldenAll(child);
+        }
+    }
+
+    /// <summary>岛上那一排小按钮。样式统一，别让它们看起来像卡片里的大按钮。</summary>
+    private Button MakeIslandButton(string label, Func<Task> action, double minWidth = 0)
+    {
+        var button = new Button
+        {
+            Content = label,
+            FontSize = 12,
+            Padding = new Thickness(6, 2, 6, 2),
+            CornerRadius = new CornerRadius(5),
+            BorderThickness = new Thickness(1),
+            BorderBrush = _pillEdgeBrush,
+            MinWidth = minWidth,
+        };
+        button.Click += async (_, _) => await action();
+        return button;
+    }
+
     /// <summary>把最新状态铺到界面上（UI 线程调用）。</summary>
     public void Apply(ClashSnapshot snapshot)
     {
@@ -351,8 +480,7 @@ public sealed class ClashIslandView : UserControl, IMorphView
             _delay.Text = "";
             _delayChipBrush.Color = Windows.UI.Color.FromArgb(0, 0, 0, 0);
 
-            _modeText.Text = "--";
-            _modeChipBrush.Color = ClashFormat.ModeColor("");
+            HighlightMode("");
             _speedUp.Text = "";
             _speedDown.Text = "";
             _downLine.Points.Clear();
@@ -365,7 +493,16 @@ public sealed class ClashIslandView : UserControl, IMorphView
         }
 
         var raw = snapshot.ActiveNode;
-        var code = ClashFormat.DetectRegionCode(raw);
+
+        // 国旗优先用**真实出口 IP 的归属地**。
+        // 节点名经常骗人：「自动选择」「故障转移」「香港01」的实际落地可能在日本。
+        // 只有查不到时（没开 ipgeo / 网络失败）才退回按节点名判断。
+        //
+        // 注意：IP 这条路**必须同样过一遍 DisplayCode**（台湾 → 中华人民共和国的国旗），
+        // 否则出口 IP 报 TW 时会漏掉这条映射、显示出不该出现的旗。
+        var code = string.IsNullOrEmpty(_plugin.ExitCountry)
+            ? ClashFormat.DetectRegionCode(raw)
+            : ClashFormat.DisplayCode(_plugin.ExitCountry);
 
         _fullName = string.IsNullOrEmpty(raw) ? "未选节点" : ClashFormat.CleanNode(raw);
 
@@ -383,12 +520,16 @@ public sealed class ClashIslandView : UserControl, IMorphView
 
         _delay.Text = ClashFormat.Delay(snapshot.ActiveDelay);
         var delayColor = ClashFormat.DelayColor(snapshot.ActiveDelay);
-        _delayBrush.Color = delayColor;
-        _delayChipBrush.Color = Windows.UI.Color.FromArgb(46, delayColor.R, delayColor.G, delayColor.B);
+
+        // 延迟芯片：**白字 + 实心色底**。
+        // 之前是「文字和底色同一个色相、底色只有 18% 不透明」—— 绿字压浅绿底，
+        // 对比度几乎为零；在纯黑岛上勉强能看，背景一浅就彻底读不出来。
+        // 实心底 + 白字是胶囊标签的标准做法，任何背景下都清晰。
+        _delayBrush.Color = Windows.UI.Color.FromArgb(255, 255, 255, 255);
+        _delayChipBrush.Color = delayColor;
 
         // 模式胶囊 + 彩色上下行
-        _modeText.Text = ClashFormat.Mode(snapshot.Mode);
-        _modeChipBrush.Color = ClashFormat.ModeColor(snapshot.Mode);
+        HighlightMode(snapshot.Mode);
         _speedUp.Text = $"↑ {ClashFormat.Speed(snapshot.UpPerSec)}";
         _speedDown.Text = $"↓ {ClashFormat.Speed(snapshot.DownPerSec)}";
 
@@ -398,8 +539,33 @@ public sealed class ClashIslandView : UserControl, IMorphView
         // 第三行：分组 · 连接数 · 累计流量 · TUN 状态
         var tun = snapshot.TunEnabled ? "TUN 开" : "TUN 关";
         var group = string.IsNullOrEmpty(snapshot.ActiveGroup) ? "—" : snapshot.ActiveGroup;
-        _sub.Text = $"{group} · {snapshot.Connections} 连接 · " +
-                    $"↑{ClashFormat.Bytes(snapshot.UpTotal)} ↓{ClashFormat.Bytes(snapshot.DownTotal)} · {tun}";
+
+        // 层级：标签压暗、数字提亮 —— 一眼先看到数字。
+        // 这段塞了 4 个数字，必须用最省字符的写法，否则整行溢出 400px 会被裁掉。
+        static string Tiny(long b) => b switch
+        {
+            < 0 => "--",
+            < 1024L * 1024 => $"{b / 1024}K",
+            < 1024L * 1024 * 1024 => $"{b / (1024L * 1024)}M",
+            _ => $"{b / (1024L * 1024 * 1024.0):0.#}G",
+        };
+
+        _sub.Inlines.Clear();
+        Append($"{group} · {snapshot.Connections}连接 · ", false);
+        Append(tun, true);                       // tun 本身已经是「TUN 开 / TUN 关」，别再加前缀
+        Append("   今日 ", false);
+        Append($"↑{Tiny(snapshot.TodayUp)}↓{Tiny(snapshot.TodayDown)}", true);
+        Append("  本月 ", false);
+        Append($"↑{Tiny(snapshot.MonthUp)}↓{Tiny(snapshot.MonthDown)}", true);
+
+        void Append(string text, bool strong)
+        {
+            _sub.Inlines.Add(new Microsoft.UI.Xaml.Documents.Run
+            {
+                Text = text,
+                Foreground = strong ? _textBrush : _faintBrush,
+            });
+        }
     }
 
     /// <summary>
@@ -555,21 +721,66 @@ public sealed class ClashIslandView : UserControl, IMorphView
         _flagBrush.ImageSource = null;
     }
 
-    /// <summary>中性色：岛体深色时是白色系，浅色（Fluent + 浅色系统）时是黑色系。</summary>
+    /// <summary>
+    /// 岛体配色。**跟插件的"外观"走，不是跟岛体主题走** ——
+    /// 用户把外观选成白色玻璃时，盖在胶囊上的药丸是浅色的，文字必须翻成深色。
+    /// </summary>
     private void ApplyThemeColors()
     {
         _textBrush.Color = Neutral(255);
-        _mutedBrush.Color = Neutral(210);
-        _faintBrush.Color = Neutral(150);
+        _mutedBrush.Color = Neutral(238);
+        _faintBrush.Color = Neutral(200);
         _flagEdgeBrush.Color = Neutral(70);
+        _chipIdleBrush.Color = Neutral(44);
 
-        // 浅色岛上"白底旗"（日本、塞浦路斯…）会和底色糊在一起，加一圈极淡的描边分开；
-        // 深色岛本来就不需要，保持 0 边框最干净。
+        // 浅色底上"白底旗"（日本、塞浦路斯…）会和底色糊在一起，加一圈极淡的描边分开；
+        // 深色底本来就不需要，保持 0 边框最干净。
         _flagVisual.BorderBrush = _flagEdgeBrush;
-        _flagVisual.BorderThickness = _theme.IsLight ? new Thickness(1) : new Thickness(0);
+        _flagVisual.BorderThickness = _plugin.AppearanceIsLight ? new Thickness(1) : new Thickness(0);
+
+        RefreshAppearance();
     }
 
-    private Windows.UI.Color Neutral(byte alpha) => _theme.IsLight
+    /// <summary>给自绘的岛体药丸上色。用户关掉自绘时就把药丸做成全透明，露出宿主原样。</summary>
+    public void RefreshAppearance()
+    {
+        if (!_plugin.IslandOwnBackground)
+        {
+            _pillStopTop.Color = Windows.UI.Color.FromArgb(0, 0, 0, 0);
+            _pillStopMid.Color = Windows.UI.Color.FromArgb(0, 0, 0, 0);
+            _pillStopBottom.Color = Windows.UI.Color.FromArgb(0, 0, 0, 0);
+            _pillEdgeBrush.Color = Windows.UI.Color.FromArgb(0, 0, 0, 0);
+            return;
+        }
+
+        var baseColor = _plugin.AppearanceBaseColor;
+        var alpha = _plugin.CardOpacity / 100.0;
+
+        byte A(double k) => (byte)Math.Clamp(alpha * 255 * k, 0, 255);
+
+        // 上亮下暗：平涂那层灰看着像塑料，有梯度才像"受光的一块材料"
+        _pillStopTop.Color = Windows.UI.Color.FromArgb(A(1.12), baseColor.R, baseColor.G, baseColor.B);
+        _pillStopMid.Color = Windows.UI.Color.FromArgb(A(0.92), baseColor.R, baseColor.G, baseColor.B);
+        _pillStopBottom.Color = Windows.UI.Color.FromArgb(A(0.74), baseColor.R, baseColor.G, baseColor.B);
+
+        // 浅色玻璃用暗边勾轮廓，深色玻璃用亮边挂光
+        _pillEdgeBrush.Color = _plugin.AppearanceIsLight
+            ? Windows.UI.Color.FromArgb(72, 0, 0, 0)
+            : Windows.UI.Color.FromArgb(96, 255, 255, 255);
+
+        // 强调色：用户设了就盖掉网速曲线的默认蓝
+        if (_plugin.AccentColor is Windows.UI.Color accent)
+        {
+            _downLineBrush.Color = Windows.UI.Color.FromArgb(210, accent.R, accent.G, accent.B);
+        }
+        else
+        {
+            _downLineBrush.Color = Windows.UI.Color.FromArgb(210, 0x4C, 0xC2, 0xFF);
+        }
+    }
+
+    /// <summary>中性色：看**当前外观**的明暗，不是看岛体主题。</summary>
+    private Windows.UI.Color Neutral(byte alpha) => _plugin.AppearanceIsLight
         ? Windows.UI.Color.FromArgb(alpha, 0, 0, 0)
         : Windows.UI.Color.FromArgb(alpha, 255, 255, 255);
 
@@ -601,7 +812,7 @@ public sealed class ClashIslandView : UserControl, IMorphView
         var durationMs = Math.Max(1, _morphDuration.TotalMilliseconds);
         var t = Math.Clamp(elapsed / durationMs, 0, 1);
 
-        ApplyMorph(_morphFrom + (_morphTarget - _morphFrom) * BackEaseOut(t));
+        ApplyMorph(_morphFrom + (_morphTarget - _morphFrom) * LiquidEase(t));
 
         if (t >= 1)
         {
@@ -610,11 +821,20 @@ public sealed class ClashIslandView : UserControl, IMorphView
         }
     }
 
-    /// <summary>BackEase(EaseOut, A) = 1 + (A+1)(t-1)³ + A(t-1)²，与 XAML 那条曲线等价。</summary>
-    private static double BackEaseOut(double t)
+    /// <summary>
+    /// 液态玻璃的动效曲线：一条欠阻尼的"铺开—回稳"响应。
+    /// 比 BackEase 更柔、余韵更长，像一滴液体摊开，而不是机械回弹。
+    /// </summary>
+    private static double LiquidEase(double t)
     {
-        var d = t - 1;
-        return 1 + (BackAmplitude + 1) * d * d * d + BackAmplitude * d * d;
+        if (t >= 1) return 1;
+
+        const double omega = 10.5;   // 快慢
+        const double zeta = 0.62;    // 阻尼比：越大越稳，越小越弹
+        var wd = omega * Math.Sqrt(1 - zeta * zeta);
+        var decay = Math.Exp(-zeta * omega * t);
+
+        return 1 - decay * (Math.Cos(wd * t) + zeta / Math.Sqrt(1 - zeta * zeta) * Math.Sin(wd * t));
     }
 
     /// <summary>把 0~1 的形态进度铺到各元素上。progress 会因 BackEase 略微越过 0/1。</summary>
@@ -633,6 +853,10 @@ public sealed class ClashIslandView : UserControl, IMorphView
         _title.Width = CompactTitleMaxWidth + (ExpandedTitleMaxWidth - CompactTitleMaxWidth) * progress;
         _root.Width = CompactContentWidth + (ExpandedContentWidth - CompactContentWidth) * progress;
         _delay.FontSize = 11 + 2 * progress;
+
+        // 药丸跟着一起变圆（宽度交给宿主 Stretch，不再自己算）
+        _pill.CornerRadius = new CornerRadius(
+            PillRadiusCompact + (PillRadiusExpanded - PillRadiusCompact) * progress);
 
         // 宽度在变：过了一半就换成全名，正好配合展开动画
         UpdateTitleText();

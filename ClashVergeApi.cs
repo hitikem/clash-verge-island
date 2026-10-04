@@ -41,6 +41,17 @@ public sealed record ClashConfig(string Mode, bool TunEnabled, int MixedPort);
 /// <summary>当前节点对某个测速网站的延迟。</summary>
 public sealed record ClashSiteLatency(string Name, string Url, int Delay);
 
+/// <summary>
+/// 一条正在活动的连接（"谁在用流量"）。
+/// Process 在 Windows 上不一定有值 —— 取决于内核有没有权限拿到进程名，
+/// 拿不到就靠 Host 显示，功能不受影响。
+/// </summary>
+public sealed record ClashConnection(
+    string Id, string Host, string Process, long Download, long Upload, string Rule, string Chains)
+{
+    public long Total => Download + Upload;
+}
+
 /// <summary>一次刷新拿到的全部状态。</summary>
 public sealed class ClashSnapshot
 {
@@ -87,6 +98,15 @@ public sealed class ClashSnapshot
 
     /// <summary>混合代理端口。</summary>
     public int MixedPort { get; set; }
+
+    /// <summary>按流量从大到小排的活动连接（卡片里显示"谁在用流量"）。</summary>
+    public List<ClashConnection> TopConnections { get; set; } = new();
+
+    /// <summary>今日 / 本月的累计流量（自己攒的，见 TrafficStats）。</summary>
+    public long TodayUp { get; set; }
+    public long TodayDown { get; set; }
+    public long MonthUp { get; set; }
+    public long MonthDown { get; set; }
 }
 
 /// <summary>接口返回了非 2xx 时抛出（带状态码，方便翻译成人话）。</summary>
@@ -342,6 +362,158 @@ internal sealed class ClashVergeApi : IDisposable
         }
 
         return ok;
+    }
+
+    /// <summary>
+    /// GET /connections → 正在活动的连接，按流量从大到小排。
+    /// 这是"我没下东西为什么这么慢"的答案：能看到是哪个域名 / 哪个进程在吃带宽。
+    /// </summary>
+    public async Task<List<ClashConnection>> GetConnectionsAsync(CancellationToken ct)
+    {
+        using var doc = await SendAsync(HttpMethod.Get, "/connections", null, ct).ConfigureAwait(false);
+        var list = new List<ClashConnection>();
+
+        if (!doc.RootElement.TryGetProperty("connections", out var arr) ||
+            arr.ValueKind != JsonValueKind.Array)
+        {
+            return list;
+        }
+
+        foreach (var item in arr.EnumerateArray())
+        {
+            var up = item.TryGetProperty("upload", out var u) && u.TryGetInt64(out var uv) ? uv : 0;
+            var down = item.TryGetProperty("download", out var d) && d.TryGetInt64(out var dv) ? dv : 0;
+
+            var host = "";
+            var process = "";
+            var rule = ReadString(item, "rule");
+
+            if (item.TryGetProperty("metadata", out var meta) && meta.ValueKind == JsonValueKind.Object)
+            {
+                host = ReadString(meta, "host");
+                if (string.IsNullOrWhiteSpace(host)) host = ReadString(meta, "destinationIP");
+                process = ReadString(meta, "process");
+                if (string.IsNullOrWhiteSpace(rule)) rule = ReadString(meta, "rule");
+            }
+
+            var chains = "";
+            if (item.TryGetProperty("chains", out var ch) && ch.ValueKind == JsonValueKind.Array)
+            {
+                chains = string.Join(" → ", ch.EnumerateArray().Select(x => x.GetString() ?? ""));
+            }
+
+            list.Add(new ClashConnection(ReadString(item, "id"), host, process, down, up, rule, chains));
+        }
+
+        return list.OrderByDescending(c => c.Total).ToList();
+    }
+
+    /// <summary>
+    /// 查**真实出口 IP** 的归属地（走代理发请求）。
+    ///
+    /// 为什么必须这样：节点名经常骗人 —— 「自动选择」「故障转移」「香港01」的实际落地
+    /// 可能在日本。只有出口 IP 的归属地是真的。
+    /// 代价：这个请求会经过代理到达第三方归属地服务，对方能看到你的出口 IP
+    /// （Clash Verge 自己的「IP 信息」面板也是同一做法）。
+    /// </summary>
+    public static async Task<string> GetExitCountryAsync(
+        int proxyPort, string url, CancellationToken ct)
+    {
+        try
+        {
+            using var handler = new HttpClientHandler
+            {
+                // 这里**必须走代理**（和访问本地接口相反）—— 要的就是"同一个出口"
+                UseProxy = true,
+                Proxy = new System.Net.WebProxy($"http://127.0.0.1:{proxyPort}"),
+            };
+
+            using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(12) };
+            var body = await client.GetStringAsync(url, ct).ConfigureAwait(false);
+
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+
+            // 各家字段名不一样，都试一遍
+            foreach (var key in new[] { "country", "country_code", "countryCode" })
+            {
+                if (root.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String)
+                {
+                    var code = value.GetString() ?? "";
+                    if (code.Length == 2) return code.ToUpperInvariant();
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // 查不到就让调用方退回按节点名判断
+        }
+
+        return "";
+    }
+
+    /// <summary>GET /providers/proxies → 所有「代理订阅」的名字。</summary>
+    public async Task<List<string>> GetProxyProviderNamesAsync(CancellationToken ct)
+    {
+        using var doc = await SendAsync(HttpMethod.Get, "/providers/proxies", null, ct).ConfigureAwait(false);
+
+        var list = new List<string>();
+        if (doc.RootElement.TryGetProperty("providers", out var providers) &&
+            providers.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in providers.EnumerateObject())
+            {
+                list.Add(property.Name);
+            }
+        }
+
+        return list;
+    }
+
+    /// <summary>PUT /providers/proxies/{名} —— 让这个订阅立刻去拉最新的节点。</summary>
+    public Task UpdateProviderAsync(string name, CancellationToken ct) =>
+        SendAsync(HttpMethod.Put, "/providers/proxies/" + Uri.EscapeDataString(name), null, ct);
+
+    /// <summary>DELETE /connections/{id} —— 断开一条连接。</summary>
+    public Task CloseConnectionAsync(string id, CancellationToken ct) =>
+        SendAsync(HttpMethod.Delete, "/connections/" + Uri.EscapeDataString(id), null, ct);
+
+    /// <summary>DELETE /connections —— 断开全部连接。</summary>
+    public Task CloseAllConnectionsAsync(CancellationToken ct) =>
+        SendAsync(HttpMethod.Delete, "/connections", null, ct);
+
+    /// <summary>PATCH /configs —— 开关 TUN 模式。</summary>
+    public Task SetTunAsync(bool enabled, CancellationToken ct) =>
+        SendAsync(HttpMethod.Patch, "/configs",
+            "{\"tun\":{\"enable\":" + (enabled ? "true" : "false") + "}}", ct);
+
+    /// <summary>
+    /// GET /group/{组}/delay —— 整组测速，返回「节点名 → 延迟」。
+    /// 「一键切最快节点」就是靠它：测完挑最小的那个切过去。
+    /// </summary>
+    public async Task<Dictionary<string, int>> TestGroupDelaysAsync(
+        string group, string testUrl, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(testUrl))
+        {
+            testUrl = "https://www.gstatic.com/generate_204";
+        }
+
+        var path = $"/group/{Uri.EscapeDataString(group)}/delay" +
+                   $"?url={Uri.EscapeDataString(testUrl)}&timeout=5000";
+
+        using var doc = await SendAsync(HttpMethod.Get, path, null, ct).ConfigureAwait(false);
+
+        var result = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var property in doc.RootElement.EnumerateObject())
+        {
+            if (property.Value.TryGetInt32(out var ms) && ms > 0)
+            {
+                result[property.Name] = ms;
+            }
+        }
+
+        return result;
     }
 
     /// <summary>

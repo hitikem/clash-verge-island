@@ -42,6 +42,20 @@ internal static class ClashFormat
     };
 
     /// <summary>
+    /// 紧凑体积："1.2G" / "812M" / "45K"。
+    /// 岛上那一行要塞「连接数 + TUN + 今日上下行 + 本月上下行」，
+    /// 带空格的 "1.2 GB" 会把整行撑爆，所以这里不留空格。
+    /// </summary>
+    public static string BytesCompact(long bytes)
+    {
+        if (bytes < 0) return "--";
+        if (bytes < 1024) return $"{bytes}B";
+        if (bytes < 1024L * 1024) return $"{bytes / 1024.0:0.#}K";
+        if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024):0.#}M";
+        return $"{bytes / (1024.0 * 1024 * 1024):0.##}G";
+    }
+
+    /// <summary>
     /// 延迟文字。
     ///
     /// 注意：内核在**测速失败/超时**时给的延迟是 `0`，不是"很快"。

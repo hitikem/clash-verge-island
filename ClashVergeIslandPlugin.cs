@@ -25,6 +25,10 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
     private const int HistoryLength = 60;
 
     private readonly ClashVergeApi _api = new();
+
+    /// <summary>今日 / 本月流量（内核只给"自启动以来"，所以自己攒并落盘）。</summary>
+    private TrafficStats _traffic = new();
+    private int _trafficSaveTick;
     private readonly Queue<double> _downHistory = new();
     private readonly Queue<double> _upHistory = new();
 
@@ -157,9 +161,265 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
     /// <summary>岛体当前是否浅色（聚光卡配色要用）。</summary>
     public bool ThemeIsLight => Theme.IsLight;
 
+    // ---- 聚光卡外观（用户可自定义）----
+
+    /// <summary>
+    /// 卡片外观风格：
+    /// auto = 跟随岛体主题 / dark = 深色玻璃 / white = 白色 /
+    /// glass = 液态玻璃（冷色）/ custom = 自定义颜色。
+    /// </summary>
+    public string CardStyle => Settings.Get("cardstyle", "glass");
+
+    /// <summary>自定义颜色（仅 CardStyle == "custom" 时用），格式 #RRGGBB。</summary>
+    public string CardColorHex => Settings.Get("cardcolor", "#1B2434");
+
+    /// <summary>自定义颜色的不透明度（0-100）。**所有风格都生效** —— 这就是"玻璃有多透"。</summary>
+    public int CardOpacity => Math.Clamp(Settings.Get("cardopacity", 62), 5, 100);
+
+    /// <summary>岛体要不要自绘背景（盖住宿主那个黑色胶囊）。</summary>
+    public bool IslandOwnBackground => Settings.Get("islandbg", true);
+
+    /// <summary>当前外观算浅色吗（岛体和卡片共用一个判断）。</summary>
+    public bool AppearanceIsLight
+    {
+        get
+        {
+            switch (CardStyle)
+            {
+                case "white": return true;
+                case "dark": return false;
+                case "glass": return false;
+                case "custom":
+                    var c = ParseHexColor(CardColorHex, Windows.UI.Color.FromArgb(255, 0x1B, 0x24, 0x34));
+                    var a = CardOpacity / 100.0;
+                    var lum = (0.2126 * c.R + 0.7152 * c.G + 0.0722 * c.B) / 255.0;
+                    return lum * a + 0.04 * (1 - a) > 0.55;
+                default:
+                    return Theme.IsLight;
+            }
+        }
+    }
+
+    /// <summary>当前外观的基色（岛体和卡片共用）。</summary>
+    public Windows.UI.Color AppearanceBaseColor => CardStyle switch
+    {
+        "white" => Windows.UI.Color.FromArgb(255, 255, 255, 255),
+        "dark" => Windows.UI.Color.FromArgb(255, 0x0E, 0x12, 0x1A),
+        "glass" => Windows.UI.Color.FromArgb(255, 0xEC, 0xF2, 0xFF),
+        "custom" => ParseHexColor(CardColorHex, Windows.UI.Color.FromArgb(255, 0x1B, 0x24, 0x34)),
+        _ => AppearanceIsLight
+            ? Windows.UI.Color.FromArgb(255, 255, 255, 255)
+            : Windows.UI.Color.FromArgb(255, 0xEC, 0xF2, 0xFF),
+    };
+
+    public void SetCardAppearance(string? style = null, string? colorHex = null, int? opacity = null)
+    {
+        var changed = false;
+
+        if (!string.IsNullOrWhiteSpace(style) && !string.Equals(style, CardStyle, StringComparison.Ordinal))
+        {
+            Settings.Set("cardstyle", style);
+            changed = true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(colorHex) && !string.Equals(colorHex, CardColorHex, StringComparison.OrdinalIgnoreCase))
+        {
+            Settings.Set("cardcolor", colorHex);
+            changed = true;
+        }
+
+        if (opacity is int op && op != CardOpacity)
+        {
+            Settings.Set("cardopacity", Math.Clamp(op, 0, 100));
+            changed = true;
+        }
+
+        // 外观是画上去的，不是绑定 —— 改完要主动让岛体和卡片各重刷一次
+        if (changed)
+        {
+            _view.RefreshAppearance();
+            _spotlight?.RefreshAppearance();
+        }
+    }
+
+    /// <summary>把 "#RRGGBB" 解析成颜色；解析不了就给个中性深蓝。</summary>
+    public static Windows.UI.Color ParseHexColor(string? hex, Windows.UI.Color fallback)
+    {
+        var text = (hex ?? "").Trim().TrimStart('#');
+        if (text.Length == 6 &&
+            byte.TryParse(text[..2], System.Globalization.NumberStyles.HexNumber, null, out var r) &&
+            byte.TryParse(text[2..4], System.Globalization.NumberStyles.HexNumber, null, out var g) &&
+            byte.TryParse(text[4..6], System.Globalization.NumberStyles.HexNumber, null, out var b))
+        {
+            return Windows.UI.Color.FromArgb(255, r, g, b);
+        }
+
+        return fallback;
+    }
+
+    // ---- 订阅更新 / 场景切换 ----
+
+    /// <summary>触发所有代理订阅立即更新。返回成功触发几个。</summary>
+    public async Task<int> UpdateSubscriptionsAsync()
+    {
+        try
+        {
+            var (host, port, secret) = ReadConfig();
+            _api.Configure(host, port, secret);
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+            var names = await _api.GetProxyProviderNamesAsync(cts.Token).ConfigureAwait(false);
+
+            if (names.Count == 0)
+            {
+                Log.Warn("更新订阅：没找到代理订阅（provider）");
+                return 0;
+            }
+
+            var ok = 0;
+            foreach (var name in names)
+            {
+                try
+                {
+                    await _api.UpdateProviderAsync(name, cts.Token).ConfigureAwait(false);
+                    ok++;
+                    Log.Info($"订阅已触发更新：{name}");
+                }
+                catch (Exception ex)
+                {
+                    Log.Warn($"订阅 {name} 更新失败：{ex.Message}");
+                }
+            }
+
+            return ok;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"更新订阅失败：{ex.Message}");
+            return 0;
+        }
+    }
+
+    /// <summary>场景 → 节点名关键词。匹配不到就退回「切最快」，绝不什么都不做。</summary>
+    private static readonly Dictionary<string, string[]> SceneKeywords = new(StringComparer.Ordinal)
+    {
+        ["video"] = new[] { "流媒体", "奈飞", "Netflix", "Disney", "YouTube", "解锁", "影视", "媒体" },
+        ["game"] = new[] { "游戏", "低延迟", "IPLC", "IEPL", "专线", "加速", "Game" },
+        ["download"] = new[] { "大带宽", "高速", "下载", "不限", "GB" },
+    };
+
+    /// <summary>按场景一键切换：按节点名关键词挑，多个匹配取当前延迟最低的那个。</summary>
+    public async Task<string?> SwitchBySceneAsync(string scene)
+    {
+        var group = _snapshot.Groups.FirstOrDefault(
+            g => string.Equals(g.Name, _snapshot.ActiveGroup, StringComparison.Ordinal));
+
+        if (group is null || !SceneKeywords.TryGetValue(scene, out var keywords)) return null;
+
+        var nodes = HideInfoEntries
+            ? group.Nodes.Where(n => !ClashFormat.IsInfoEntry(n.Name)).ToList()
+            : group.Nodes.ToList();
+
+        var matched = nodes
+            .Where(n => keywords.Any(k => n.Name.Contains(k, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        if (matched.Count == 0)
+        {
+            Log.Info($"场景 {scene}：没有匹配的节点，退回一键切最快");
+            return await SwitchToFastestAsync().ConfigureAwait(false);
+        }
+
+        var pick = matched
+            .Where(n => n.Delay > 0)
+            .OrderBy(n => n.Delay)
+            .Select(n => n.Name)
+            .FirstOrDefault() ?? matched[0].Name;
+
+        Log.Info($"场景 {scene} → {pick}");
+        await SelectNodeAsync(group.Name, pick).ConfigureAwait(false);
+        return pick;
+    }
+
+    /// <summary>
+    /// 真实出口 IP 的归属地（两位国家码）。空 = 还没查到，视图会退回按节点名判断。
+    /// 节点名经常骗人（「自动选择」「故障转移」），只有出口 IP 是真的。
+    /// </summary>
+    public string ExitCountry { get; private set; } = "";
+
+    private DateTimeOffset _lastGeoAt;
+
+    /// <summary>立刻重查出口归属地（设置页 / 岛上的刷新按钮）。</summary>
+    public async Task RefreshExitNowAsync()
+    {
+        _lastGeoAt = default;   // 清掉节流时间戳，下一次调用就会真的发请求
+        await MaybeRefreshExitCountryAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>按间隔查一次出口归属地（默认 300 秒，和 Clash Verge 的 IP 信息一致）。</summary>
+    private async Task MaybeRefreshExitCountryAsync()
+    {
+        if (!Settings.Get("ipgeo", true)) return;
+
+        var interval = Math.Clamp(Settings.Get("ipgeosec", 300), 60, 3600);
+        if (_lastGeoAt != default && (DateTimeOffset.UtcNow - _lastGeoAt).TotalSeconds < interval) return;
+
+        _lastGeoAt = DateTimeOffset.UtcNow;
+
+        // 注意用**混合代理端口**（7897），不是外部控制端口（9097）——
+        // 前者才是 HTTP 代理，后者是 Clash 的 REST 接口，当代理用必然连不上。
+        var proxyPort = _snapshot.MixedPort > 0 ? _snapshot.MixedPort : 7897;
+
+        // 多服务回退：单一服务在国内网络经常不通（ipinfo.io 尤其不稳），
+        // 挨个试，哪个先回就用哪个。用户也可以在设置里指定 ipgeourl 只走那一个。
+        var configured = Settings.Get("ipgeourl", "");
+        var candidates = string.IsNullOrWhiteSpace(configured)
+            ? new[]
+              {
+                  "https://api.ip.sb/geoip",
+                  "https://ipwho.is/",
+                  "https://ipinfo.io/json",
+              }
+            : new[] { configured };
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+
+        var code = "";
+        foreach (var url in candidates)
+        {
+            code = await ClashVergeApi.GetExitCountryAsync(proxyPort, url, cts.Token).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(code))
+            {
+                Log.Info($"出口归属地：{code}（来源 {url}）");
+                break;
+            }
+        }
+
+        if (string.IsNullOrEmpty(code))
+        {
+            Log.Warn($"出口归属地查询失败（代理端口 {proxyPort}，试了 {candidates.Length} 个服务）");
+            return;
+        }
+
+        if (string.Equals(code, ExitCountry, StringComparison.Ordinal)) return;
+
+        ExitCountry = code;
+        Log.Info($"出口归属地：{code}");
+
+        // 归属地变了要立刻重画国旗
+        Context.RunOnUI(() =>
+        {
+            _view.Apply(_snapshot);
+            _spotlight?.Apply(_snapshot);
+        });
+    }
+
     protected override Task OnInitializeAsync()
     {
         Log.Info($"启动：{Manifest.Id} {Manifest.Version}，插件目录 {PluginDirectory}");
+
+        // 今日/本月流量是攒出来的，从磁盘接着算
+        _traffic = TrafficStats.Load(PluginDirectory);
 
         _flags = new FlagLibrary(PluginDirectory);
         _targets = ClashTestTargets.Load();
@@ -168,7 +428,7 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         ClashFormat.TaiwanAsChina = Settings.Get("twchina", true);
 
         Log.Info($"测速网站（{_targets.Count} 个）：{string.Join("、", _targets.Select(t => t.Name))}，当前用 {SelectedTargetName}");
-        _view = new ClashIslandView(Manifest, Theme, _flags);
+        _view = new ClashIslandView(Manifest, Theme, _flags, this);
 
         _content = CreateContent();
 
@@ -203,6 +463,16 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
             _spotlight?.Apply(_snapshot);
         }));
 
+        // 外观改了要重刷配色（设置页里会主动刷一次，这里兜底别的改动路径）
+        foreach (var key in new[] { "cardstyle", "cardcolor", "cardopacity", "islandbg", "accent" })
+        {
+            Context.Register(Context.OnSettingsChanged(key, () =>
+            {
+                _view.RefreshAppearance();
+                _spotlight?.RefreshAppearance();
+            }));
+        }
+
         if (Settings.Get("enabled", true))
         {
             SetContent(_content);
@@ -229,7 +499,7 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         OwnerAccent = Windows.UI.Color.FromArgb(255, 0x4C, 0xC2, 0xFF),
         MorphView = _view,
         CompactSize = new Windows.Foundation.Size(180, 40),
-        ExpandedSize = new Windows.Foundation.Size(420, 140),
+        ExpandedSize = new Windows.Foundation.Size(420, 176),
         OnTap = OpenSpotlight,          // 点击岛体 = 打开聚光卡
     };
 
@@ -248,12 +518,21 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
 
         // 网站延迟：按设置走（最快可以到 1 秒）
         await MaybeRefreshSiteDelaysAsync().ConfigureAwait(false);
+
+        // 出口归属地：每 30 秒探一次（内部还会按 ipgeosec 再节流，默认 300 秒才真发请求）
+        if (_tickCount % 30 == 0)
+        {
+            await MaybeRefreshExitCountryAsync().ConfigureAwait(false);
+        }
     }
 
     protected override Task OnShutdownAsync()
     {
         _stopped = true;
         Log.Info("已停用");
+
+        // 流量统计落盘，下次启动接着算
+        _traffic.Save(PluginDirectory);
 
         // 退订主题事件，否则宿主会一直持有视图 → 插件程序集无法回收
         _view.Detach();
@@ -359,6 +638,37 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
             snapshot.Connections = traffic.Connections;
             snapshot.UpTotal = traffic.Up;
             snapshot.DownTotal = traffic.Down;
+
+            // 今日 / 本月：把这次采样并进统计，并铺到快照上给卡片显示
+            _traffic.Add(traffic.Up, traffic.Down, DateTimeOffset.Now);
+            snapshot.TodayUp = _traffic.TodayUp;
+            snapshot.TodayDown = _traffic.TodayDown;
+            snapshot.MonthUp = _traffic.MonthUp;
+            snapshot.MonthDown = _traffic.MonthDown;
+
+            // 每 30 次刷新（约 1 分钟）落一次盘，别每 2 秒写文件
+            if (++_trafficSaveTick >= 30)
+            {
+                _trafficSaveTick = 0;
+                _traffic.Save(PluginDirectory);
+            }
+
+            // 「谁在用流量」只有卡片打开时才看得见，没必要一直拉
+            if (_spotlight is not null)
+            {
+                try
+                {
+                    using var connCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    connCts.CancelAfter(TimeSpan.FromSeconds(4));
+                    var connections = await _api.GetConnectionsAsync(connCts.Token).ConfigureAwait(false);
+                    // 只取前 4 条：12 条会把卡片撑爆（12×30 = 360px，而整卡只有 670）
+                    snapshot.TopConnections = connections.Take(4).ToList();
+                }
+                catch (Exception)
+                {
+                    // 拉不到就不显示这一块，不能影响其它数据
+                }
+            }
 
             var now = DateTimeOffset.UtcNow;
             if (_lastUp >= 0 && _lastTrafficAt != default)
@@ -587,7 +897,7 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         Context.Island.OpenSpotlight(new IslandSpotlight
         {
             Content = _spotlight,
-            Size = new Windows.Foundation.Size(830, 620),
+            Size = new Windows.Foundation.Size(960, 670),
             OnClosed = () => _spotlight?.OnHostClosed(),
         });
 
@@ -612,9 +922,174 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         }
     }
 
-    /// <summary>切换某个分组里选中的节点。</summary>
-    public async Task SelectNodeAsync(string group, string node)
+    /// <summary>只测一个节点（卡片里每行的「测」按钮）。</summary>
+    public async Task<int> TestSingleNodeAsync(string node)
     {
+        if (string.IsNullOrWhiteSpace(node)) return -1;
+
+        try
+        {
+            var (host, port, secret) = ReadConfig();
+            _api.Configure(host, port, secret);
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            var delay = await _api.TestNodeAsync(node, TestUrlFor(_snapshot.ActiveGroup), cts.Token)
+                .ConfigureAwait(false);
+
+            Log.Info($"单节点测速：{node} → {delay} ms");
+            await RefreshAsync("单节点测速").ConfigureAwait(false);
+            return delay;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"单节点测速失败：{ex.Message}");
+            return -1;
+        }
+    }
+
+    /// <summary>在岛上直接切到「上一个 / 下一个」节点，不用点开卡片。</summary>
+    public async Task<bool> SwitchNodeRelativeAsync(int delta)
+    {
+        var group = _snapshot.Groups.FirstOrDefault(
+            g => string.Equals(g.Name, _snapshot.ActiveGroup, StringComparison.Ordinal));
+
+        if (group is null || group.Nodes.Count == 0) return false;
+
+        var nodes = HideInfoEntries
+            ? group.Nodes.Where(n => !ClashFormat.IsInfoEntry(n.Name)).ToList()
+            : group.Nodes.ToList();
+
+        if (nodes.Count == 0) return false;
+
+        var index = nodes.FindIndex(n => string.Equals(n.Name, group.Now, StringComparison.Ordinal));
+        if (index < 0) index = 0;
+
+        var next = ((index + delta) % nodes.Count + nodes.Count) % nodes.Count;
+        await SelectNodeAsync(group.Name, nodes[next].Name).ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>切到本组延迟最低的节点。</summary>
+    ///
+    /// 这是相对 Clash Verge 原界面**最有价值**的一个操作：
+    /// 那边要「点开策略组 → 点测速 → 等一圈 → 找到最快的 → 点它」，
+    /// 这里一步到位。信息条目（剩余流量 / 套餐到期…）不参与评选。
+    /// </summary>
+    public async Task<string?> SwitchToFastestAsync()
+    {
+        var group = _snapshot.ActiveGroup;
+        if (string.IsNullOrWhiteSpace(group))
+        {
+            Log.Warn("一键切最快：当前没有选中的分组");
+            return null;
+        }
+
+        try
+        {
+            var (host, port, secret) = ReadConfig();
+            _api.Configure(host, port, secret);
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(35));
+            var delays = await _api.TestGroupDelaysAsync(group, TestUrlFor(group), cts.Token)
+                .ConfigureAwait(false);
+
+            var best = delays
+                .Where(kv => kv.Value > 0 && !ClashFormat.IsInfoEntry(kv.Key))
+                .OrderBy(kv => kv.Value)
+                .Select(kv => (kv.Key, kv.Value))
+                .FirstOrDefault();
+
+            if (string.IsNullOrEmpty(best.Key))
+            {
+                Log.Warn("一键切最快：本组没测出可用节点");
+                return null;
+            }
+
+            Log.Info($"一键切最快：{group} → {best.Key}（{best.Value} ms）");
+            await SelectNodeAsync(group, best.Key).ConfigureAwait(false);
+            return best.Key;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"一键切最快失败：{ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>断开一条连接（「谁在用流量」里那一行的 × 按钮）。</summary>
+    public async Task CloseConnectionAsync(string id)
+    {
+        if (string.IsNullOrWhiteSpace(id)) return;
+
+        try
+        {
+            var (host, port, secret) = ReadConfig();
+            _api.Configure(host, port, secret);
+            await _api.CloseConnectionAsync(id, CancellationToken.None).ConfigureAwait(false);
+            Log.Info("已断开一条连接");
+            await RefreshAsync("断开连接").ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"断开连接失败：{ex.Message}");
+        }
+    }
+
+    /// <summary>断开全部连接。</summary>
+    public async Task CloseAllConnectionsAsync()
+    {
+        try
+        {
+            var (host, port, secret) = ReadConfig();
+            _api.Configure(host, port, secret);
+            await _api.CloseAllConnectionsAsync(CancellationToken.None).ConfigureAwait(false);
+            Log.Info("已断开全部连接");
+            await RefreshAsync("断开全部连接").ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"断开全部连接失败：{ex.Message}");
+        }
+    }
+
+    /// <summary>开关 TUN 模式（游戏 / 需要全局接管时用得上）。</summary>
+    public async Task SetTunAsync(bool enabled)
+    {
+        try
+        {
+            var (host, port, secret) = ReadConfig();
+            _api.Configure(host, port, secret);
+            await _api.SetTunAsync(enabled, CancellationToken.None).ConfigureAwait(false);
+            Log.Info($"TUN 模式 → {(enabled ? "开" : "关")}");
+            await RefreshAsync("切换 TUN").ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"切换 TUN 失败：{ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 强调色（模式胶囊 / 网速曲线 / 趋势线）。空字符串 = 用默认的青蓝。
+    /// </summary>
+    public string AccentColorHex => Settings.Get("accent", "");
+
+    /// <summary>强调色；没设置就返回 null，各元素用各自默认色。</summary>
+    public Windows.UI.Color? AccentColor => string.IsNullOrWhiteSpace(AccentColorHex)
+        ? null
+        : ParseHexColor(AccentColorHex, Windows.UI.Color.FromArgb(255, 0x4C, 0xC2, 0xFF));
+
+    public void SetAccentColor(string hex)
+    {
+        if (string.Equals(hex, AccentColorHex, StringComparison.OrdinalIgnoreCase)) return;
+        Settings.Set("accent", hex ?? "");
+
+        _view.RefreshAppearance();
+        _spotlight?.RefreshAppearance();
+    }
+
+    /// <summary>切换某个分组里选中的节点。</summary>
+    public async Task SelectNodeAsync(string group, string node)    {
         try
         {
             var (host, port, secret) = ReadConfig();
@@ -809,6 +1284,234 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
                                "内置音乐模块在放歌时会把优先级抬到 200：选 150 就是「放歌时让给音乐，不放歌时显示本插件」。",
                         TextWrapping = TextWrapping.Wrap,
                         Opacity = 0.7,
+                        FontSize = 12,
+                    },
+                },
+            },
+        });
+
+        // ── 聚光卡外观 ──────────────────────────────────────────
+        // 卡片的底是宿主画的，插件改不了 —— 但可以整张盖一层自己的玻璃，
+        // 于是「颜色」就成了用户可选项：白卡片 / 深色 / 液态玻璃 / 完全自定义。
+        var cardStyles = new (string Label, string Value)[]
+        {
+            ("跟随岛体主题", "auto"),
+            ("液态玻璃（冷色，推荐）", "glass"),
+            ("深色", "dark"),
+            ("白色", "white"),
+            ("自定义颜色…", "custom"),
+        };
+
+        var cardStyleBox = new ComboBox { Header = "聚光卡外观", MinWidth = 300 };
+        foreach (var style in cardStyles) cardStyleBox.Items.Add(style.Label);
+
+        var styleIndex = Array.FindIndex(cardStyles, s => s.Value == CardStyle);
+        cardStyleBox.SelectedIndex = styleIndex >= 0 ? styleIndex : 1;
+
+        var cardColorPicker = new ColorPicker
+        {
+            Color = ParseHexColor(CardColorHex, Windows.UI.Color.FromArgb(255, 0x1B, 0x24, 0x34)),
+            IsAlphaEnabled = false,
+            IsHexInputVisible = true,
+            ColorSpectrumShape = ColorSpectrumShape.Box,
+            IsMoreButtonVisible = false,
+            MinWidth = 320,
+        };
+
+        var cardOpacitySlider = new Slider
+        {
+            Header = $"玻璃不透明度（{CardOpacity}%）",
+            Minimum = 5,
+            Maximum = 100,
+            Value = CardOpacity,
+            StepFrequency = 1,
+            Width = 300,
+        };
+
+        // 取色器只在「自定义颜色」时才出现；**不透明度滑块一直都在** —— 任何风格都该能调透
+        var customPanel = new StackPanel
+        {
+            Spacing = 8,
+            Visibility = CardStyle == "custom" ? Visibility.Visible : Visibility.Collapsed,
+            Children = { cardColorPicker },
+        };
+
+        cardStyleBox.SelectionChanged += (_, _) =>
+        {
+            var i = cardStyleBox.SelectedIndex;
+            if (i < 0 || i >= cardStyles.Length) return;
+
+            var value = cardStyles[i].Value;
+            customPanel.Visibility = value == "custom" ? Visibility.Visible : Visibility.Collapsed;
+            SetCardAppearance(value);
+        };
+
+        cardColorPicker.ColorChanged += (_, e) =>
+        {
+            SetCardAppearance("custom", $"#{e.NewColor.R:X2}{e.NewColor.G:X2}{e.NewColor.B:X2}");
+        };
+
+        cardOpacitySlider.ValueChanged += (_, e) =>
+        {
+            cardOpacitySlider.Header = $"玻璃不透明度（{(int)e.NewValue}%）";
+            SetCardAppearance(null, null, (int)e.NewValue);
+        };
+
+        // 岛体那个黑胶囊是宿主画的。勾上这个，插件就自己画一个圆角药丸盖上去 ——
+        // 于是岛体也能有颜色 / 透明度。
+        var islandBg = new CheckBox
+        {
+            Content = "自绘岛体背景（盖住宿主那个黑胶囊，让岛体也能用玻璃色）",
+            IsChecked = Settings.Get("islandbg", true),
+        };
+        islandBg.Checked += (_, _) => { Settings.Set("islandbg", true); _view.RefreshAppearance(); };
+        islandBg.Unchecked += (_, _) => { Settings.Set("islandbg", false); _view.RefreshAppearance(); };
+
+        panel.Children.Add(new Border
+        {
+            Style = (Style)Application.Current.Resources["SettingsCardStyle"],
+            Child = new StackPanel
+            {
+                Spacing = 10,
+                Children =
+                {
+                    cardStyleBox,
+                    new TextBlock
+                    {
+                        Text = "岛体和卡片的底色本来是宿主画的、改不了；插件自己盖了一层玻璃，" +
+                               "所以颜色和透明度都归你定。选浅色时文字会自动翻成深色。",
+                        TextWrapping = TextWrapping.Wrap,
+                        Opacity = 0.75,
+                        FontSize = 12,
+                    },
+                    customPanel,
+                    cardOpacitySlider,
+                    islandBg,
+                },
+            },
+        });
+
+        // ── IP 归属地 ────────────────────────────────────────────
+        // 节点名经常骗人（「自动选择」「故障转移」「香港01」），国旗按**真实出口 IP** 显示。
+        // 刷新间隔的选项排布和上面「网站延迟」用同一个模板。
+        var ipOptions = new (string Label, int Seconds)[]
+        {
+            ("1 分钟", 60),
+            ("5 分钟（推荐，同 Clash Verge）", 300),
+            ("15 分钟", 900),
+            ("30 分钟", 1800),
+            ("1 小时", 3600),
+        };
+
+        var ipBox = new ComboBox { Header = "IP 归属地刷新间隔", MinWidth = 300 };
+        foreach (var option in ipOptions) ipBox.Items.Add(option.Label);
+
+        var currentIpSeconds = Math.Clamp(Settings.Get("ipgeosec", 300), 60, 3600);
+        var ipIndex = Array.FindIndex(ipOptions, o => o.Seconds == currentIpSeconds);
+        ipBox.SelectedIndex = ipIndex >= 0 ? ipIndex : 1;
+        ipBox.SelectionChanged += (_, _) =>
+        {
+            var i = ipBox.SelectedIndex;
+            if (i < 0 || i >= ipOptions.Length) return;
+
+            var seconds = ipOptions[i].Seconds;
+            if (Settings.Get("ipgeosec", 300) != seconds) Settings.Set("ipgeosec", seconds);
+        };
+
+        var refreshIp = new Button
+        {
+            Content = "立即刷新 IP 归属地",
+            HorizontalAlignment = HorizontalAlignment.Left,
+        };
+        refreshIp.Click += async (_, _) =>
+        {
+            refreshIp.IsEnabled = false;
+            try
+            {
+                await RefreshExitNowAsync();
+                refreshIp.Content = string.IsNullOrEmpty(ExitCountry)
+                    ? "刷新失败（检查代理是否可用）"
+                    : $"已识别：{ExitCountry}";
+            }
+            finally
+            {
+                refreshIp.IsEnabled = true;
+            }
+        };
+
+        panel.Children.Add(new Border
+        {
+            Style = (Style)Application.Current.Resources["SettingsCardStyle"],
+            Child = new StackPanel
+            {
+                Spacing = 10,
+                Children =
+                {
+                    ipBox,
+                    refreshIp,
+                    new TextBlock
+                    {
+                        Text = "国旗按**真实出口 IP** 的归属地显示，不再依赖节点名 —— " +
+                               "「自动选择」「故障转移」这类名字看不出国家，「香港01」也可能实际落在日本。\n" +
+                               "查询会经过代理向第三方归属地服务发一个请求（和 Clash Verge 的「IP 信息」同一做法）；" +
+                               "查不到时会退回按节点名判断。",
+                        TextWrapping = TextWrapping.Wrap,
+                        Opacity = 0.75,
+                        FontSize = 12,
+                    },
+                },
+            },
+        });
+
+        // ── 强调色：模式胶囊 / 网速曲线 / 延迟趋势线 ──────────────
+        var accentAuto = new CheckBox
+        {
+            Content = "用默认配色（不自定义强调色）",
+            IsChecked = string.IsNullOrWhiteSpace(AccentColorHex),
+        };
+
+        var accentPicker = new ColorPicker
+        {
+            Color = AccentColor ?? Windows.UI.Color.FromArgb(255, 0x4C, 0xC2, 0xFF),
+            IsAlphaEnabled = false,
+            IsHexInputVisible = true,
+            ColorSpectrumShape = ColorSpectrumShape.Box,
+            IsMoreButtonVisible = false,
+            MinWidth = 320,
+            IsEnabled = accentAuto.IsChecked != true,
+        };
+
+        accentAuto.Checked += (_, _) =>
+        {
+            accentPicker.IsEnabled = false;
+            SetAccentColor("");
+        };
+        accentAuto.Unchecked += (_, _) =>
+        {
+            accentPicker.IsEnabled = true;
+            SetAccentColor($"#{accentPicker.Color.R:X2}{accentPicker.Color.G:X2}{accentPicker.Color.B:X2}");
+        };
+        accentPicker.ColorChanged += (_, e) =>
+        {
+            if (accentAuto.IsChecked == true) return;
+            SetAccentColor($"#{e.NewColor.R:X2}{e.NewColor.G:X2}{e.NewColor.B:X2}");
+        };
+
+        panel.Children.Add(new Border
+        {
+            Style = (Style)Application.Current.Resources["SettingsCardStyle"],
+            Child = new StackPanel
+            {
+                Spacing = 10,
+                Children =
+                {
+                    accentAuto,
+                    accentPicker,
+                    new TextBlock
+                    {
+                        Text = "强调色用在：岛上的模式胶囊、网速曲线，以及卡片里的延迟趋势线。",
+                        TextWrapping = TextWrapping.Wrap,
+                        Opacity = 0.75,
                         FontSize = 12,
                     },
                 },

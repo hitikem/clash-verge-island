@@ -19,6 +19,12 @@ public sealed class ClashIslandSpotlightView : UserControl
     /// <summary>节点太多时只显示前若干个，避免一次性造几千个按钮。</summary>
     private const int MaxNodes = 300;
 
+    /// <summary>
+    /// 聚光卡的期望高度（要和插件里 OpenSpotlight 的 Size.Height 保持一致）。
+    /// 用来给根容器兜底撑高 —— 宿主按内容的期望高度给尺寸，内容一短玻璃就只剩半块。
+    /// </summary>
+    private const double CardHeight = 670;
+
     private readonly ClashVergeIslandPlugin _plugin;
     private readonly IIslandTheme _theme;
 
@@ -31,13 +37,57 @@ public sealed class ClashIslandSpotlightView : UserControl
     private readonly StackPanel _nodeList = new() { Spacing = 2 };
     private readonly TextBlock _hint = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap };
 
+    /// <summary>今日 / 本月流量那一行。</summary>
+    private readonly TextBlock _trafficText = new();
+
     private readonly SolidColorBrush _textBrush = new();
     private readonly SolidColorBrush _mutedBrush = new();
     private readonly SolidColorBrush _faintBrush = new();
-    private readonly SolidColorBrush _dividerBrush = new();
     private readonly SolidColorBrush _rowBrush = new();
+    private readonly SolidColorBrush _rowHoverBrush = new();
+    private readonly SolidColorBrush _rowEdgeBrush = new();
     private readonly SolidColorBrush _selectedRowBrush = new();
+    private readonly SolidColorBrush _selectedRowEdgeBrush = new();
     private readonly SolidColorBrush _flagEdgeBrush = new();
+    private readonly SolidColorBrush _pillEdgeBrush = new();
+
+    // 分隔线做成「两端淡出」：在深色卡片上一条通到底的实线显得很硬
+    private readonly GradientStop _dividerStopA = new() { Offset = 0.0 };
+    private readonly GradientStop _dividerStopB = new() { Offset = 0.5 };
+    private readonly GradientStop _dividerStopC = new() { Offset = 1.0 };
+    private readonly LinearGradientBrush _dividerBrush;
+
+    // 卡片顶沿的一道高光：模拟玻璃受光面，是「有厚度」和「一块色板」的分界
+    private readonly GradientStop _glossStopA = new() { Offset = 0.0 };
+    private readonly GradientStop _glossStopB = new() { Offset = 0.5 };
+    private readonly GradientStop _glossStopC = new() { Offset = 1.0 };
+    private readonly LinearGradientBrush _glossBrush;
+
+    // 曲线下方的面积渐变（顶端有色 → 底端透明）
+    private readonly GradientStop _areaStopTop = new() { Offset = 0.0 };
+    private readonly GradientStop _areaStopBottom = new() { Offset = 1.0 };
+    private readonly LinearGradientBrush _areaBrush;
+
+    // ── 液态玻璃 ────────────────────────────────────────────────
+    // 宿主画的是**不透明**的深色卡片底，插件没法换掉它。
+    // 既然改不了下面那层，就整张**盖一层自己的玻璃**：半透明提亮 + 上亮下暗的边 + 左上角高光。
+    private readonly GradientStop _glassStopTop = new() { Offset = 0.0 };
+    private readonly GradientStop _glassStopMid = new() { Offset = 0.55 };
+    private readonly GradientStop _glassStopBottom = new() { Offset = 1.0 };
+    private readonly LinearGradientBrush _glassBrush;
+
+    private readonly GradientStop _glassEdgeTop = new() { Offset = 0.0 };
+    private readonly GradientStop _glassEdgeMid = new() { Offset = 0.45 };
+    private readonly GradientStop _glassEdgeBottom = new() { Offset = 1.0 };
+    private readonly LinearGradientBrush _glassEdgeBrush;
+
+    /// <summary>左上角那道斜向反光。玻璃最关键的信号不是模糊，是这道高光。</summary>
+    private readonly GradientStop _sheenStart = new() { Offset = 0.0 };
+    private readonly GradientStop _sheenEnd = new() { Offset = 1.0 };
+    private readonly LinearGradientBrush _sheenBrush;
+
+    /// <summary>玻璃内圈：贴边一圈极淡的亮线，让"玻璃有厚度"。</summary>
+    private readonly SolidColorBrush _glassInnerBrush = new();
 
     /// <summary>
     /// 延迟颜色用共享画刷。原来是每次刷新都给每个节点 new 一个画刷
@@ -72,6 +122,35 @@ public sealed class ClashIslandSpotlightView : UserControl
     private readonly List<Button> _modeButtons = new();
     private readonly Dictionary<string, Button> _targetButtons = new(StringComparer.Ordinal);
 
+    /// <summary>TUN 开关。用 _syncingTun 防止"程序填值"被当成用户操作（和下拉框一个坑）。</summary>
+    private readonly ToggleSwitch _tunSwitch = new()
+    {
+        Header = "TUN",
+        OnContent = "开",
+        OffContent = "关",
+        MinWidth = 96,
+        Margin = new Thickness(10, 0, 0, 0),
+        VerticalAlignment = VerticalAlignment.Center,
+    };
+
+    private bool _syncingTun;
+
+    /// <summary>「谁在用流量」的列表容器。</summary>
+    private readonly StackPanel _connList = new() { Spacing = 2 };
+    private readonly TextBlock _connEmpty = new() { FontSize = 13, Margin = new Thickness(4, 8, 0, 8) };
+    private readonly Dictionary<string, Border> _connRows = new(StringComparer.Ordinal);
+
+    /// <summary>地区筛选条 + 当前选中的地区（空 = 全部）。</summary>
+    private readonly StackPanel _regionRow = new() { Orientation = Orientation.Horizontal, Spacing = 6 };
+    private string _regionFilter = "";
+
+    /// <summary>本组里延迟最低的节点名（空 = 还没测出可用节点），行里用它标「最快」。</summary>
+    private string _fastestNode = "";
+
+    /// <summary>最快节点那一行的描边色（一眼看出来该选哪个）。</summary>
+    private readonly SolidColorBrush _fastestEdgeBrush =
+        new(Windows.UI.Color.FromArgb(200, 0x3F, 0xB9, 0x50));
+
     /// <summary>每个测速网站芯片里的延迟文字（键是网站 URL），实时更新。</summary>
     private readonly Dictionary<string, TextBlock> _targetDelays = new(StringComparer.Ordinal);
 
@@ -79,13 +158,21 @@ public sealed class ClashIslandSpotlightView : UserControl
     private readonly TextBlock _trendCaption = new()
     {
         Text = "延迟趋势",
-        FontSize = 12,
+        FontSize = 13.5,
         VerticalAlignment = VerticalAlignment.Center,
     };
 
-    private readonly Canvas _trendCanvas = new() { Height = 26, Width = 620 };
+    private readonly Canvas _trendCanvas = new() { Height = 30, Width = 800 };
     private readonly Polyline _trendLine;
-    private readonly SolidColorBrush _trendBrush = new(Windows.UI.Color.FromArgb(220, 0x4C, 0xC2, 0xFF));
+
+    /// <summary>曲线下方的渐变面积 —— 单单一根细线在深色卡片上太空、太单薄。</summary>
+    private readonly Polygon _trendArea = new() { StrokeThickness = 0 };
+
+    /// <summary>曲线末端的亮点，标出「现在」在哪。</summary>
+    private readonly Ellipse _trendDot = new() { Width = 6, Height = 6, Visibility = Visibility.Collapsed };
+
+    private readonly SolidColorBrush _trendBrush = new(Windows.UI.Color.FromArgb(235, 0x5C, 0xC8, 0xFF));
+    private readonly SolidColorBrush _trendDotBrush = new(Windows.UI.Color.FromArgb(255, 0xA8, 0xE0, 0xFF));
 
     private readonly FlagLibrary _flags;
     private readonly TextBox _search = new() { PlaceholderText = "搜索节点…", MinWidth = 180 };
@@ -109,6 +196,9 @@ public sealed class ClashIslandSpotlightView : UserControl
     private string _builtGroup = "";
     private string _builtSignature = "";
     private string _groupSignature = "";
+
+    /// <summary>当前分组选中的节点名。鼠标移出节点行时要靠它决定还原成"选中"还是"普通"底色。</summary>
+    private string _currentNodeName = "";
     private bool _loading = true;
 
     public ClashIslandSpotlightView(
@@ -117,6 +207,51 @@ public sealed class ClashIslandSpotlightView : UserControl
         _plugin = plugin;
         _theme = theme;
         _flags = flags;
+
+        // 三支渐变画刷在这里建：GradientStops 要装的是上面那几个字段实例，
+        // 换主题时直接改那些 stop 的颜色，画刷不用重建。
+        _dividerBrush = new LinearGradientBrush
+        {
+            StartPoint = new Windows.Foundation.Point(0, 0.5),
+            EndPoint = new Windows.Foundation.Point(1, 0.5),
+            GradientStops = { _dividerStopA, _dividerStopB, _dividerStopC },
+        };
+        _glossBrush = new LinearGradientBrush
+        {
+            StartPoint = new Windows.Foundation.Point(0, 0.5),
+            EndPoint = new Windows.Foundation.Point(1, 0.5),
+            GradientStops = { _glossStopA, _glossStopB, _glossStopC },
+        };
+        _areaBrush = new LinearGradientBrush
+        {
+            StartPoint = new Windows.Foundation.Point(0, 0),
+            EndPoint = new Windows.Foundation.Point(0, 1),
+            GradientStops = { _areaStopTop, _areaStopBottom },
+        };
+
+        // 玻璃主体：从上到下略微变淡，模拟"上面受光多"
+        _glassBrush = new LinearGradientBrush
+        {
+            StartPoint = new Windows.Foundation.Point(0, 0),
+            EndPoint = new Windows.Foundation.Point(0, 1),
+            GradientStops = { _glassStopTop, _glassStopMid, _glassStopBottom },
+        };
+
+        // 玻璃的边：顶上那圈最亮，往下收掉 —— 这一条决定了它像不像一块有厚度的玻璃
+        _glassEdgeBrush = new LinearGradientBrush
+        {
+            StartPoint = new Windows.Foundation.Point(0, 0),
+            EndPoint = new Windows.Foundation.Point(0, 1),
+            GradientStops = { _glassEdgeTop, _glassEdgeMid, _glassEdgeBottom },
+        };
+
+        // 左上角斜向高光（135° 扫过去）
+        _sheenBrush = new LinearGradientBrush
+        {
+            StartPoint = new Windows.Foundation.Point(0, 0),
+            EndPoint = new Windows.Foundation.Point(1, 1),
+            GradientStops = { _sheenStart, _sheenEnd },
+        };
 
         ApplyThemeColors();
         _theme.Changed += ApplyThemeColors;
@@ -146,6 +281,14 @@ public sealed class ClashIslandSpotlightView : UserControl
         modeRow.Children.Add(MakeModeButton("global", "全局"));
         modeRow.Children.Add(MakeModeButton("direct", "直连"));
 
+        // TUN 开关（游戏 / 需要全局接管时用得上）
+        _tunSwitch.Toggled += async (_, _) =>
+        {
+            if (_syncingTun) return;      // 程序填值不算用户操作
+            await _plugin.SetTunAsync(_tunSwitch.IsOn);
+        };
+        modeRow.Children.Add(_tunSwitch);
+
         // 分组选择
         var groupRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         groupRow.Children.Add(new TextBlock
@@ -158,17 +301,50 @@ public sealed class ClashIslandSpotlightView : UserControl
         });
         groupRow.Children.Add(_groupBox);
 
-        var refresh = new Button { Content = "刷新" };
+        var refresh = new Button
+        {
+            Content = "刷新",
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(14, 5, 14, 5),
+        };
         refresh.Click += async (_, _) => await _plugin.RefreshNowAsync("聚光卡刷新");
 
-        var test = new Button { Content = "测试本组延迟" };
+        // 文字别超宽：原来写「测试本组延迟」6 个字，被按钮宽度裁成了「测试本组延」
+        var test = new Button
+        {
+            Content = "本组测速",
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(14, 5, 14, 5),
+        };
         test.Click += async (_, _) =>
         {
             var group = _groupBox.SelectedItem as string;
             if (!string.IsNullOrEmpty(group)) await _plugin.TestGroupAsync(group);
         };
+        // 一键切最快：这个插件相对 Clash Verge 原界面最有价值的一步
+        var fastest = new Button
+        {
+            Content = "切最快",
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(14, 5, 14, 5),
+        };
+        fastest.Click += async (_, _) =>
+        {
+            fastest.IsEnabled = false;
+            try
+            {
+                var picked = await _plugin.SwitchToFastestAsync();
+                _hint.Text = picked is null ? "没测出可用节点" : $"已切到最快：{picked}";
+            }
+            finally
+            {
+                fastest.IsEnabled = true;
+            }
+        };
+
         groupRow.Children.Add(refresh);
         groupRow.Children.Add(test);
+        groupRow.Children.Add(fastest);
         groupRow.Children.Add(_search);
 
         // 搜索：过滤节点名（机场节点动辄上百个，没搜索很难找）
@@ -223,7 +399,10 @@ public sealed class ClashIslandSpotlightView : UserControl
             {
                 Content = content,
                 Tag = target.Name,
-                Padding = new Thickness(10, 4, 10, 4),
+                Padding = new Thickness(12, 5, 12, 5),
+                CornerRadius = new CornerRadius(6),
+                BorderThickness = new Thickness(1),
+                BorderBrush = _rowEdgeBrush,
             };
             button.Click += (_, _) => _plugin.SetTarget(target.Name);
             _targetButtons[target.Name] = button;
@@ -235,7 +414,10 @@ public sealed class ClashIslandSpotlightView : UserControl
         {
             Content = "全部测试",
             FontSize = 12,
-            Padding = new Thickness(10, 4, 10, 4),
+            Padding = new Thickness(12, 5, 12, 5),
+            CornerRadius = new CornerRadius(6),
+            BorderThickness = new Thickness(1),
+            BorderBrush = _rowEdgeBrush,
         };
         testAll.Click += async (_, _) => await _plugin.TestAllSitesAsync();
         targetRow.Children.Add(testAll);
@@ -297,8 +479,9 @@ public sealed class ClashIslandSpotlightView : UserControl
 
         var root = new StackPanel
         {
-            Spacing = 12,
-            Padding = new Thickness(32, 28, 32, 28),
+            // 行距 12 → 8：卡片里十几行，每行省 4px 就是 50px —— 比压缩任何单个控件都值
+            Spacing = 8,
+            Padding = new Thickness(32, 24, 32, 24),
         };
         root.Children.Add(titleRow);
         root.Children.Add(_status);
@@ -309,10 +492,16 @@ public sealed class ClashIslandSpotlightView : UserControl
         _trendLine = new Polyline
         {
             Stroke = _trendBrush,
-            StrokeThickness = 1.8,
+            StrokeThickness = 2,
             StrokeLineJoin = PenLineJoin.Round,
         };
+        _trendArea.Fill = _areaBrush;
+        _trendDot.Fill = _trendDotBrush;
+
+        // 图层顺序：面积在最下，线压在上面，末端的亮点在最上层
+        _trendCanvas.Children.Add(_trendArea);
         _trendCanvas.Children.Add(_trendLine);
+        _trendCanvas.Children.Add(_trendDot);
 
         var trendRow = new Grid();
         trendRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -324,21 +513,228 @@ public sealed class ClashIslandSpotlightView : UserControl
         trendRow.Children.Add(_trendCanvas);
         root.Children.Add(trendRow);
 
+        // 今日 / 本月流量（自己攒的，见 TrafficStats）
+        _trafficText.Foreground = _mutedBrush;
+        _trafficText.FontSize = 12.5;
+        root.Children.Add(_trafficText);
+
         // 顺序：先看数据（趋势 + 网站延迟）→ 再动设置（模式 / 分组）→ 最后是节点列表
         root.Children.Add(targetRow);
         root.Children.Add(modeRow);
+
+        // 场景切换 + 更新订阅：不想研究节点名的时候，点一下就行
+        var sceneRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        sceneRow.Children.Add(new TextBlock
+        {
+            Text = "场景",
+            FontSize = 13,
+            Width = 56,
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = _mutedBrush,
+        });
+
+        foreach (var (scene, label) in new[] { ("video", "看视频"), ("game", "游戏"), ("download", "下载") })
+        {
+            var captured = scene;
+            var sceneButton = new Button
+            {
+                Content = label,
+                FontSize = 12,
+                Padding = new Thickness(12, 4, 12, 4),
+                CornerRadius = new CornerRadius(6),
+                BorderThickness = new Thickness(1),
+                BorderBrush = _rowEdgeBrush,
+            };
+            sceneButton.Click += async (_, _) =>
+            {
+                sceneButton.IsEnabled = false;
+                try
+                {
+                    var picked = await _plugin.SwitchBySceneAsync(captured);
+                    _hint.Text = picked is null ? "没有可用的节点" : $"已切到：{picked}";
+                }
+                finally
+                {
+                    sceneButton.IsEnabled = true;
+                }
+            };
+            sceneRow.Children.Add(sceneButton);
+        }
+
+        var updateSubs = new Button
+        {
+            Content = "更新订阅",
+            FontSize = 12,
+            Padding = new Thickness(12, 4, 12, 4),
+            CornerRadius = new CornerRadius(6),
+            BorderThickness = new Thickness(1),
+            BorderBrush = _rowEdgeBrush,
+            Margin = new Thickness(8, 0, 0, 0),
+        };
+        updateSubs.Click += async (_, _) =>
+        {
+            updateSubs.IsEnabled = false;
+            try
+            {
+                var count = await _plugin.UpdateSubscriptionsAsync();
+                _hint.Text = count == 0 ? "没找到代理订阅" : $"已触发 {count} 个订阅更新";
+            }
+            finally
+            {
+                updateSubs.IsEnabled = true;
+            }
+        };
+        sceneRow.Children.Add(updateSubs);
+
+        // 立刻重查出口归属地（国旗是跟 IP 走的，换节点后想马上看到结果就点它）
+        var refreshIp = new Button
+        {
+            Content = "IP",
+            FontSize = 12,
+            Padding = new Thickness(12, 4, 12, 4),
+            CornerRadius = new CornerRadius(6),
+            BorderThickness = new Thickness(1),
+            BorderBrush = _rowEdgeBrush,
+        };
+        refreshIp.Click += async (_, _) =>
+        {
+            refreshIp.IsEnabled = false;
+            try
+            {
+                await _plugin.RefreshExitNowAsync();
+                _hint.Text = string.IsNullOrEmpty(_plugin.ExitCountry)
+                    ? "IP 归属地刷新失败"
+                    : $"出口归属地：{_plugin.ExitCountry}";
+            }
+            finally
+            {
+                refreshIp.IsEnabled = true;
+            }
+        };
+        sceneRow.Children.Add(refreshIp);
+
+        root.Children.Add(sceneRow);
         root.Children.Add(groupRow);
+        // 地区筛选：节点一多（日本/香港/新加坡… 几十个）就靠它一眼缩到想要的区
+        _regionRow.Margin = new Thickness(0, 0, 0, 2);
+        root.Children.Add(_regionRow);
+
         root.Children.Add(scroller);
+
+        // 「谁在用流量」：回答"我没下东西，为什么网速这么慢"
+        var connHeader = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        connHeader.Children.Add(new TextBlock
+        {
+            Text = "在用流量",
+            FontSize = 13,
+            Width = 56,
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = _mutedBrush,
+        });
+
+        var closeAll = new Button
+        {
+            Content = "全部断开",
+            FontSize = 12,
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(12, 4, 12, 4),
+            BorderThickness = new Thickness(1),
+            BorderBrush = _rowEdgeBrush,
+        };
+        closeAll.Click += async (_, _) =>
+        {
+            closeAll.IsEnabled = false;
+            try { await _plugin.CloseAllConnectionsAsync(); }
+            finally { closeAll.IsEnabled = true; }
+        };
+        connHeader.Children.Add(closeAll);
+
+        _connEmpty.Foreground = _faintBrush;
+        _connEmpty.Text = "没有活动连接";
+
+        var connSection = new StackPanel { Spacing = 6 };
+        connSection.Children.Add(connHeader);
+        connSection.Children.Add(_connEmpty);
+        connSection.Children.Add(_connList);
+        root.Children.Add(connSection);
+
         root.Children.Add(_hint);
 
-        Content = root;
+        // 卡片的底是宿主画的，插件只能在内容里叠质感。
+        // 用一层 Grid 把「顶沿高光」放到最上层并贴住卡片顶边（横向内缩，避开圆角），
+        // 一道受光边就能把「一块色板」和「一块有厚度的玻璃」区分开。
+        var gloss = new Border
+        {
+            Height = 1.5,
+            Background = _glossBrush,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(26, 0, 26, 0),
+        };
+
+        // 玻璃主体：铺满整张卡。
+        // MinHeight 是这里的关键 —— 宿主是按我们内容的**期望高度**给尺寸的，不是按卡片高度。
+        // 不顶住的话，内容一短（比如节点列表为空），玻璃就只有半块，下半截露出宿主的黑底。
+        var glass = new Border
+        {
+            CornerRadius = new CornerRadius(13),
+            Margin = new Thickness(1),
+            Background = _glassBrush,
+            BorderBrush = _glassEdgeBrush,
+            BorderThickness = new Thickness(1),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            IsHitTestVisible = false,
+        };
+
+        // 斜向反光：铺满整张卡并平滑淡出。
+        // 之前用的是固定高度（260px）硬切 —— 那会在卡片中间切出一条看得见的接缝，
+        // 看起来就是"上面半块玻璃、下面半块黑"。反光必须是整张卡上的连续渐变。
+        var sheen = new Border
+        {
+            CornerRadius = new CornerRadius(13),
+            Margin = new Thickness(1),
+            Background = _sheenBrush,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            IsHitTestVisible = false,
+        };
+
+        // 内圈亮线：离边再收 1px，玻璃有厚度才像玻璃
+        var glassInner = new Border
+        {
+            CornerRadius = new CornerRadius(12),
+            Margin = new Thickness(2),
+            BorderBrush = _glassInnerBrush,
+            BorderThickness = new Thickness(1),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            IsHitTestVisible = false,
+        };
+
+        var cardRoot = new Grid { MinHeight = CardHeight };
+        cardRoot.Children.Add(glass);
+        cardRoot.Children.Add(sheen);       // 反光放在内容【下面】，不然会把文字糊掉
+        cardRoot.Children.Add(glassInner);
+        cardRoot.Children.Add(root);        // 内容
+        cardRoot.Children.Add(gloss);       // 顶沿亮边
+
+        Content = cardRoot;
 
         _loading = false;
     }
 
     private Button MakeModeButton(string mode, string label)
     {
-        var button = new Button { Content = label, Tag = mode };
+        var button = new Button
+        {
+            Content = label,
+            Tag = mode,
+            // 圆角和内边距和「刷新 / 本组测速」统一，否则一排按钮高矮不一
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(16, 5, 16, 5),
+            MinWidth = 66,
+        };
         button.Click += async (_, _) => await _plugin.SetModeAsync(mode);
         _modeButtons.Add(button);
         return button;
@@ -385,6 +781,17 @@ public sealed class ClashIslandSpotlightView : UserControl
         ApplyHeaderFlag(snapshot.ActiveNode);
         RefreshTargetButtons(snapshot);
         DrawTrend(snapshot.DelayTrend);
+
+        // TUN 开关跟着实际状态走（填值时屏蔽事件，别把"显示"当成"用户操作"）
+        _syncingTun = true;
+        try { _tunSwitch.IsOn = snapshot.TunEnabled; }
+        finally { _syncingTun = false; }
+
+        SyncConnections(snapshot);
+
+        _trafficText.Text =
+            $"今日 ↑{ClashFormat.Bytes(snapshot.TodayUp)}  ↓{ClashFormat.Bytes(snapshot.TodayDown)}" +
+            $"     本月 ↑{ClashFormat.Bytes(snapshot.MonthUp)}  ↓{ClashFormat.Bytes(snapshot.MonthDown)}";
         _speedUp.Text = $"↑ {ClashFormat.Speed(snapshot.UpPerSec)}";
         _speedDown.Text = $"↓ {ClashFormat.Speed(snapshot.DownPerSec)}";
         _hint.Text = "点任意节点即可切换；绿色为延迟低，红色为延迟高或不可用。网站延迟：" +
@@ -440,6 +847,8 @@ public sealed class ClashIslandSpotlightView : UserControl
         var group = SelectedGroup(snapshot);
         if (group is null) return;
 
+        _currentNodeName = group.Now;
+
         // 「剩余流量 / 套餐到期」这类订阅信息条目不是能连的节点，默认藏掉，列表才干净
         var pool = _plugin.HideInfoEntries
             ? group.Nodes.Where(n => !ClashFormat.IsInfoEntry(n.Name)).ToList()
@@ -448,6 +857,14 @@ public sealed class ClashIslandSpotlightView : UserControl
         var filtered = string.IsNullOrEmpty(_filter)
             ? pool
             : pool.Where(n => n.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase)).ToList();
+
+        // 地区筛选：拿节点名里识别出来的地区码比对（DetectRegionCode 已经处理了中英文别名）
+        if (!string.IsNullOrEmpty(_regionFilter))
+        {
+            filtered = filtered
+                .Where(n => string.Equals(ClashFormat.DetectRegionCode(n.Name), _regionFilter, StringComparison.Ordinal))
+                .ToList();
+        }
 
         // 按延迟从快到慢排（没测过的排最后），让"哪个节点快"一眼可见
         if (_plugin.SortByDelay)
@@ -463,6 +880,7 @@ public sealed class ClashIslandSpotlightView : UserControl
         {
             _builtGroup = group.Name;
             _builtSignature = signature;
+            BuildRegionChips(group, pool);
             _delayLabels.Clear();
             _delayPills.Clear();
             _rowButtons.Clear();
@@ -497,6 +915,13 @@ public sealed class ClashIslandSpotlightView : UserControl
             }
         }
 
+        // 「最快」是随延迟实时变的，所以放在就地更新这一轮算，不跟重建走
+        _fastestNode = visible
+            .Where(n => n.Delay > 0 && !ClashFormat.IsInfoEntry(n.Name))
+            .OrderBy(n => n.Delay)
+            .Select(n => n.Name)
+            .FirstOrDefault() ?? "";
+
         // 延迟和「当前选中」会变，就地更新，不重建控件树
         foreach (var node in visible)
         {
@@ -513,7 +938,14 @@ public sealed class ClashIslandSpotlightView : UserControl
             if (_rowButtons.TryGetValue(node.Name, out var button))
             {
                 var isCurrent = string.Equals(node.Name, group.Now, StringComparison.Ordinal);
+                var isFastest = !string.IsNullOrEmpty(_fastestNode) &&
+                                string.Equals(node.Name, _fastestNode, StringComparison.Ordinal);
+
                 button.Background = isCurrent ? _selectedRowBrush : _rowBrush;
+                // 最快的那行用绿边勾出来 —— 一眼知道该点哪个
+                button.BorderBrush = isFastest
+                    ? _fastestEdgeBrush
+                    : (isCurrent ? _selectedRowEdgeBrush : _rowEdgeBrush);
             }
 
             if (_rowTitles.TryGetValue(node.Name, out var title))
@@ -548,13 +980,16 @@ public sealed class ClashIslandSpotlightView : UserControl
             Foreground = _pillTextBrush,
         };
 
-        // 延迟做成小胶囊（和 Clash Verge 节点列表一个观感）：定宽，所有行的胶囊右边缘对齐
+        // 延迟做成小胶囊（和 Clash Verge 节点列表一个观感）：定宽，所有行的胶囊右边缘对齐。
+        // 加一圈极淡的亮描边 —— 实色底直接贴在深色卡片上像色块，有边才像玻璃标签。
         var delayPill = new Border
         {
             Width = 52,
             CornerRadius = new CornerRadius(9),
             Padding = new Thickness(0, 2, 0, 2),
             Background = DelayBrush(node.Delay),
+            BorderBrush = _pillEdgeBrush,
+            BorderThickness = new Thickness(1),
             VerticalAlignment = VerticalAlignment.Center,
             Child = delay,
         };
@@ -564,23 +999,57 @@ public sealed class ClashIslandSpotlightView : UserControl
         var grid = new Grid();
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });                        // 国旗
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });  // 节点名
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });                        // 单测
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });                        // 延迟
+
+        // 单节点测速：只测这一行，不用整组跑一遍
+        var testOne = new Button
+        {
+            Content = "测",
+            FontSize = 11,
+            Padding = new Thickness(8, 2, 8, 2),
+            CornerRadius = new CornerRadius(5),
+            Margin = new Thickness(0, 0, 8, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        testOne.Click += async (_, _) =>
+        {
+            testOne.IsEnabled = false;
+            try { await _plugin.TestSingleNodeAsync(node.Name); }
+            finally { testOne.IsEnabled = true; }
+        };
+
         Grid.SetColumn(glyph, 0);
         Grid.SetColumn(name, 1);
-        Grid.SetColumn(delayPill, 2);
+        Grid.SetColumn(testOne, 2);
+        Grid.SetColumn(delayPill, 3);
         grid.Children.Add(glyph);
         grid.Children.Add(name);
+        grid.Children.Add(testOne);
         grid.Children.Add(delayPill);
 
+        var isCurrent = string.Equals(node.Name, _currentNodeName, StringComparison.Ordinal);
+
+        // 玻璃条：圆角 + 1px 描边。原来是无圆角、无边框的纯色块，整片看下来像砖墙
         var button = new Button
         {
             Content = grid,
             HorizontalAlignment = HorizontalAlignment.Stretch,
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
-            Padding = new Thickness(10, 6, 10, 6),
-            Background = _rowBrush,
-            BorderThickness = new Thickness(0),
+            Padding = new Thickness(10, 7, 10, 7),
+            CornerRadius = new CornerRadius(7),
+            Background = isCurrent ? _selectedRowBrush : _rowBrush,
+            BorderBrush = isCurrent ? _selectedRowEdgeBrush : _rowEdgeBrush,
+            BorderThickness = new Thickness(1),
             Tag = node.Name,
+        };
+
+        // 悬停提亮一档：共享一支画刷就够，同一时刻只可能悬停在一行上
+        button.PointerEntered += (_, _) => button.Background = _rowHoverBrush;
+        button.PointerExited += (_, _) =>
+        {
+            var stillCurrent = string.Equals(button.Tag as string, _currentNodeName, StringComparison.Ordinal);
+            button.Background = stillCurrent ? _selectedRowBrush : _rowBrush;
         };
 
         button.Click += async (_, _) => await _plugin.SelectNodeAsync(groupName, node.Name);
@@ -599,6 +1068,8 @@ public sealed class ClashIslandSpotlightView : UserControl
     private void DrawTrend(int[] values)
     {
         _trendLine.Points.Clear();
+        _trendArea.Points.Clear();
+        _trendDot.Visibility = Visibility.Collapsed;
         _trendCaption.Text = values.Length < 2 ? "延迟趋势（采集中…）" : $"延迟趋势（{values.Length} 次）";
 
         if (values.Length < 2) return;
@@ -609,6 +1080,7 @@ public sealed class ClashIslandSpotlightView : UserControl
         var max = values.Max();
         var span = Math.Max(1, max - min);
         var step = width / (values.Length - 1);
+        var bottom = height - 3;
 
         for (var i = 0; i < values.Length; i++)
         {
@@ -616,7 +1088,18 @@ public sealed class ClashIslandSpotlightView : UserControl
             // 延迟越小越好 → 数值越小画得越高，一眼看出"什么时候变差了"
             var y = 2 + (height - 4) * (1 - (values[i] - min) / (double)span);
             _trendLine.Points.Add(new Windows.Foundation.Point(x, y));
+            _trendArea.Points.Add(new Windows.Foundation.Point(x, y));
         }
+
+        // 面积要闭合：沿底线折回来，否则 Polygon 会自动首尾相连成一条斜线
+        _trendArea.Points.Add(new Windows.Foundation.Point(width, bottom));
+        _trendArea.Points.Add(new Windows.Foundation.Point(0, bottom));
+
+        // 末端亮点：标出"现在"
+        var last = _trendLine.Points[_trendLine.Points.Count - 1];
+        Canvas.SetLeft(_trendDot, last.X - _trendDot.Width / 2);
+        Canvas.SetTop(_trendDot, last.Y - _trendDot.Height / 2);
+        _trendDot.Visibility = Visibility.Visible;
     }
 
     /// <summary>把「当前选中的测速网站」那颗按钮点亮，
@@ -663,7 +1146,13 @@ public sealed class ClashIslandSpotlightView : UserControl
     /// <summary>卡片左上角的大国旗。只在地区真的变了才重建，别每 2 秒造一堆控件。</summary>
     private void ApplyHeaderFlag(string nodeName)
     {
-        var code = ClashFormat.DisplayCode(ClashFormat.DetectRegionCode(nodeName) ?? "");
+        // 和岛体同一个规则：优先用**真实出口 IP** 的归属地，查不到才退回节点名；
+        // 两条路都要过 DisplayCode（台湾 → 中华人民共和国的国旗）。
+        var raw = string.IsNullOrEmpty(_plugin.ExitCountry)
+            ? (ClashFormat.DetectRegionCode(nodeName) ?? "")
+            : _plugin.ExitCountry;
+
+        var code = ClashFormat.DisplayCode(raw);
         if (string.Equals(code, _headerFlagCode, StringComparison.Ordinal)) return;
         _headerFlagCode = code;
 
@@ -766,18 +1255,234 @@ public sealed class ClashIslandSpotlightView : UserControl
 
     private void ApplyThemeColors()
     {
+        // 文字对比度往 Apple 那套靠：主文字纯色，次要文字也保持高对比。
+        // 之前的 205 / 145 在玻璃上会发灰、看着"不清晰"，这是最直接的元凶。
         _textBrush.Color = Neutral(255);
-        _mutedBrush.Color = Neutral(205);
-        _faintBrush.Color = Neutral(145);
-        _dividerBrush.Color = Neutral(28);
-        _rowBrush.Color = Neutral(14);
+        _mutedBrush.Color = Neutral(238);
+        _faintBrush.Color = Neutral(200);
         _flagEdgeBrush.Color = Neutral(70);
-        _selectedRowBrush.Color = _plugin.ThemeIsLight
-            ? Windows.UI.Color.FromArgb(46, 0, 0, 0)
-            : Windows.UI.Color.FromArgb(46, 255, 255, 255);
+
+        // 节点行：平时几乎看不出底，鼠标移上去提亮一档 —— 有反馈才像能点。
+        // 数值比玻璃提亮前调高了一档：底变亮之后，原来的透明度就看不见了。
+        _rowBrush.Color = Neutral(18);
+        _rowHoverBrush.Color = Neutral(44);
+        _rowEdgeBrush.Color = Neutral(36);
+
+        _selectedRowBrush.Color = Neutral(46);
+        _selectedRowEdgeBrush.Color = Neutral(80);
+
+        // 延迟胶囊的描边：深色底挂亮边、浅色底勾暗边，否则白色卡片上完全看不见
+        _pillEdgeBrush.Color = CardIsLight
+            ? Windows.UI.Color.FromArgb(60, 0, 0, 0)
+            : Windows.UI.Color.FromArgb(64, 255, 255, 255);
+
+        // 分隔线：中段可见，两端淡出
+        _dividerStopA.Color = Neutral(0);
+        _dividerStopB.Color = Neutral(54);
+        _dividerStopC.Color = Neutral(0);
+
+        // 顶沿高光：中段最亮，两端收掉
+        _glossStopA.Color = Neutral(0);
+        _glossStopB.Color = Neutral(96);
+        _glossStopC.Color = Neutral(0);
+
+        // 曲线下方的面积：贴着线一点蓝，往下很快化掉
+        _areaStopTop.Color = Windows.UI.Color.FromArgb(104, 0x4C, 0xC2, 0xFF);
+        _areaStopBottom.Color = Windows.UI.Color.FromArgb(0, 0x4C, 0xC2, 0xFF);
+
+        // 卡片外观由用户选的风格决定（见 ApplyCardAppearance）
+        ApplyCardAppearance();
     }
 
-    private Windows.UI.Color Neutral(byte alpha) => _plugin.ThemeIsLight
+    // ── 卡片外观（用户可选：跟随主题 / 深色 / 白色 / 液态玻璃 / 自定义）────
+
+    /// <summary>
+    /// 卡片当前算浅色还是深色。**统一由插件的 AppearanceIsLight 决定**，
+    /// 这样岛体和卡片永远是同一套明暗，不会一个白一个黑。
+    /// </summary>
+    private bool CardIsLight => _plugin.AppearanceIsLight;
+
+    /// <summary>弹出「谁在用流量」的每一行：进程名 / 域名 + 流量 + 断开按钮。</summary>
+    private void SyncConnections(ClashSnapshot snapshot)
+    {
+        var items = snapshot.TopConnections ?? new List<ClashConnection>();
+
+        _connEmpty.Visibility = items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        _connList.Children.Clear();
+        foreach (var connection in items)
+        {
+            _connList.Children.Add(MakeConnectionRow(connection));
+        }
+    }
+
+    private Border MakeConnectionRow(ClashConnection connection)
+    {
+        // 有进程名就用进程名（"是哪个软件在吃带宽"），没有就退回域名
+        var title = "未知";
+        if (!string.IsNullOrWhiteSpace(connection.Process))
+        {
+            try { title = System.IO.Path.GetFileName(connection.Process); }
+            catch (Exception) { title = connection.Process; }
+        }
+        else if (!string.IsNullOrWhiteSpace(connection.Host))
+        {
+            title = connection.Host;
+        }
+
+        var subtitle = string.IsNullOrWhiteSpace(connection.Host) ||
+                       string.Equals(connection.Host, title, StringComparison.OrdinalIgnoreCase)
+            ? ClashFormat.Bytes(connection.Total)
+            : $"{connection.Host} · {ClashFormat.Bytes(connection.Total)}";
+
+        var texts = new Grid();
+        texts.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        texts.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var nameText = new TextBlock
+        {
+            Text = title,
+            FontSize = 12.5,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = _textBrush,
+        };
+        var subText = new TextBlock
+        {
+            Text = subtitle,
+            FontSize = 11.5,
+            Margin = new Thickness(10, 0, 0, 0),
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = _faintBrush,
+        };
+
+        Grid.SetColumn(nameText, 0);
+        Grid.SetColumn(subText, 1);
+        texts.Children.Add(nameText);
+        texts.Children.Add(subText);
+
+        var cut = new Button
+        {
+            Content = "断开",
+            FontSize = 11,
+            CornerRadius = new CornerRadius(5),
+            Padding = new Thickness(9, 3, 9, 3),
+            Margin = new Thickness(10, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        cut.Click += async (_, _) => await _plugin.CloseConnectionAsync(connection.Id);
+
+        var row = new Grid();
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Grid.SetColumn(texts, 0);
+        Grid.SetColumn(cut, 1);
+        row.Children.Add(texts);
+        row.Children.Add(cut);
+
+        return new Border
+        {
+            Background = _rowBrush,
+            BorderBrush = _rowEdgeBrush,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(10, 6, 10, 6),
+            Child = row,
+        };
+    }
+
+    /// <summary>按当前分组里出现过的地区重建筛选条。只有一个地区时不显示（没意义）。</summary>
+    private void BuildRegionChips(ClashGroup group, IReadOnlyList<ClashNode> pool)
+    {
+        _regionRow.Children.Clear();
+
+        var codes = pool
+            .Select(n => ClashFormat.DetectRegionCode(n.Name))
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(c => c, StringComparer.Ordinal)
+            .ToList();
+
+        if (codes.Count <= 1) return;
+
+        _regionRow.Children.Add(MakeRegionChip("全部", ""));
+        foreach (var code in codes)
+        {
+            _regionRow.Children.Add(MakeRegionChip(ClashFormat.DisplayCode(code), code));
+        }
+    }
+
+    private Button MakeRegionChip(string label, string code)
+    {
+        var selected = string.Equals(code, _regionFilter, StringComparison.Ordinal);
+        var button = new Button
+        {
+            Content = label,
+            FontSize = 12,
+            Padding = new Thickness(10, 3, 10, 3),
+            CornerRadius = new CornerRadius(6),
+            BorderThickness = new Thickness(1),
+            BorderBrush = selected ? _selectedRowEdgeBrush : _rowEdgeBrush,
+            Background = selected ? _selectedRowBrush : _rowBrush,
+        };
+
+        button.Click += (_, _) =>
+        {
+            if (string.Equals(_regionFilter, code, StringComparison.Ordinal)) return;
+            _regionFilter = code;
+            _builtSignature = "";   // 筛选变了 → 重建节点列表
+            _builtGroup = "";       // 同时重建筛选条本身，更新选中态
+        };
+
+        return button;
+    }
+
+    /// <summary>按当前外观铺整块玻璃。改完要调 RefreshAppearance() 才会重画。</summary>
+    private void ApplyCardAppearance()
+    {
+        PaintGlass(_plugin.AppearanceBaseColor, _plugin.CardOpacity / 100.0);
+
+        // 强调色：趋势线和它下面的面积一起换色
+        var accent = _plugin.AccentColor ?? Windows.UI.Color.FromArgb(255, 0x5C, 0xC8, 0xFF);
+        _trendBrush.Color = Windows.UI.Color.FromArgb(235, accent.R, accent.G, accent.B);
+        _areaStopTop.Color = Windows.UI.Color.FromArgb(104, accent.R, accent.G, accent.B);
+        _areaStopBottom.Color = Windows.UI.Color.FromArgb(0, accent.R, accent.G, accent.B);
+        _trendDotBrush.Color = Windows.UI.Color.FromArgb(255, accent.R, accent.G, accent.B);
+    }
+
+    /// <summary>把一块玻璃画出来：主体上亮下暗、边两端挂光、再一道斜向反光。</summary>
+    private void PaintGlass(Windows.UI.Color baseColor, double opacity)
+    {
+        byte Alpha(double k) => (byte)Math.Clamp(opacity * 255 * k, 0, 255);
+
+        _glassStopTop.Color = WithAlpha(baseColor, Alpha(1.00));
+        _glassStopMid.Color = WithAlpha(baseColor, Alpha(0.88));
+        _glassStopBottom.Color = WithAlpha(baseColor, Alpha(0.76));
+
+        // 边：浅色卡片用暗边勾轮廓，深色卡片用亮边挂光；中间都收掉。
+        var edge = CardIsLight
+            ? Windows.UI.Color.FromArgb(255, 0, 0, 0)
+            : Windows.UI.Color.FromArgb(255, 255, 255, 255);
+
+        _glassEdgeTop.Color = WithAlpha(edge, CardIsLight ? (byte)52 : (byte)170);
+        _glassEdgeMid.Color = WithAlpha(edge, CardIsLight ? (byte)16 : (byte)34);
+        _glassEdgeBottom.Color = WithAlpha(edge, CardIsLight ? (byte)34 : (byte)100);
+        _glassInnerBrush.Color = WithAlpha(edge, CardIsLight ? (byte)14 : (byte)30);
+
+        var white = Windows.UI.Color.FromArgb(255, 255, 255, 255);
+        _sheenStart.Color = WithAlpha(white, CardIsLight ? (byte)80 : (byte)56);
+        _sheenEnd.Color = WithAlpha(white, 0);
+    }
+
+    private static Windows.UI.Color WithAlpha(Windows.UI.Color c, byte a) =>
+        Windows.UI.Color.FromArgb(a, c.R, c.G, c.B);
+
+    /// <summary>设置页改了卡片外观后，立刻重刷配色。</summary>
+    public void RefreshAppearance() => ApplyThemeColors();
+
+    /// <summary>中性色：**看卡片的明暗**，不是看岛体主题 —— 白卡片上必须用黑字。</summary>
+    private Windows.UI.Color Neutral(byte alpha) => CardIsLight
         ? Windows.UI.Color.FromArgb(alpha, 0, 0, 0)
         : Windows.UI.Color.FromArgb(alpha, 255, 255, 255);
 }
