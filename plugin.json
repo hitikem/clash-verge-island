@@ -1,11 +1,11 @@
 {
   "id": "clash-verge-island",
   "name": "Clash 小岛",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "entry_dll": "ClashVergeIsland.dll",
   "api_version": 2,
   "min_host_version": "2.3.0",
-  "description": "小岛显示 Clash Verge 当前节点和延迟，展开看模式、实时网速和四个网站的延迟，点一下弹出大卡片：切节点、切模式、测延迟。自动读取 Clash Verge 的连接参数，只需在它里面打开「外部控制」。",
+  "description": "小岛显示 Clash Verge 当前节点和延迟（国旗按真实出口 IP 识别），展开后可在岛上直接换节点、切模式、切场景、更新订阅，点一下弹出大卡片：节点列表、按地区筛选、谁在用流量、今日与本月流量统计。自动读取 Clash Verge 的连接参数，只需在它里面打开「外部控制」。",
   "author": "hit",
   "icon_glyph": "\uE774",
   "license": "MIT",
