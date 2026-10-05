@@ -660,64 +660,16 @@ public sealed class ClashIslandSpotlightView : UserControl
 
         root.Children.Add(_hint);
 
-        // 卡片的底是宿主画的，插件只能在内容里叠质感。
-        // 用一层 Grid 把「顶沿高光」放到最上层并贴住卡片顶边（横向内缩，避开圆角），
-        // 一道受光边就能把「一块色板」和「一块有厚度的玻璃」区分开。
-        var gloss = new Border
-        {
-            Height = 1.5,
-            Background = _glossBrush,
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            VerticalAlignment = VerticalAlignment.Top,
-            Margin = new Thickness(26, 0, 26, 0),
-        };
-
-        // 玻璃主体：铺满整张卡。
-        // MinHeight 是这里的关键 —— 宿主是按我们内容的**期望高度**给尺寸的，不是按卡片高度。
-        // 不顶住的话，内容一短（比如节点列表为空），玻璃就只有半块，下半截露出宿主的黑底。
-        var glass = new Border
-        {
-            CornerRadius = new CornerRadius(13),
-            Margin = new Thickness(1),
-            Background = _glassBrush,
-            BorderBrush = _glassEdgeBrush,
-            BorderThickness = new Thickness(1),
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            VerticalAlignment = VerticalAlignment.Stretch,
-            IsHitTestVisible = false,
-        };
-
-        // 斜向反光：铺满整张卡并平滑淡出。
-        // 之前用的是固定高度（260px）硬切 —— 那会在卡片中间切出一条看得见的接缝，
-        // 看起来就是"上面半块玻璃、下面半块黑"。反光必须是整张卡上的连续渐变。
-        var sheen = new Border
-        {
-            CornerRadius = new CornerRadius(13),
-            Margin = new Thickness(1),
-            Background = _sheenBrush,
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            VerticalAlignment = VerticalAlignment.Stretch,
-            IsHitTestVisible = false,
-        };
-
-        // 内圈亮线：离边再收 1px，玻璃有厚度才像玻璃
-        var glassInner = new Border
-        {
-            CornerRadius = new CornerRadius(12),
-            Margin = new Thickness(2),
-            BorderBrush = _glassInnerBrush,
-            BorderThickness = new Thickness(1),
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            VerticalAlignment = VerticalAlignment.Stretch,
-            IsHitTestVisible = false,
-        };
-
+        // 2.0 起**不再自绘卡片的底** —— 卡片的背景完全交给宿主的默认外观。
+        //
+        // 这里原本叠了四层：玻璃主体 / 斜向反光 / 内圈亮线 / 顶沿高光。
+        // 那等于给卡片套了一层插件自己的颜色（就是那层"白色玻璃"），
+        // 颜色不再可调之后这四层就没有存在意义了，只会盖住宿主的默认背景。
+        //
+        // MinHeight 必须保留：宿主是按内容的**期望高度**给卡片尺寸的，
+        // 不顶住的话内容一短（比如节点列表为空），卡片就会缩成一小块。
         var cardRoot = new Grid { MinHeight = CardHeight };
-        cardRoot.Children.Add(glass);
-        cardRoot.Children.Add(sheen);       // 反光放在内容【下面】，不然会把文字糊掉
-        cardRoot.Children.Add(glassInner);
-        cardRoot.Children.Add(root);        // 内容
-        cardRoot.Children.Add(gloss);       // 顶沿亮边
+        cardRoot.Children.Add(root);        // 只留内容
 
         Content = cardRoot;
 
