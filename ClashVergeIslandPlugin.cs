@@ -163,83 +163,28 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
 
     // ---- 聚光卡外观（用户可自定义）----
 
-    /// <summary>
-    /// 卡片外观风格：
-    /// auto = 跟随岛体主题 / dark = 深色玻璃 / white = 白色 /
-    /// glass = 液态玻璃（冷色）/ custom = 自定义颜色。
-    /// </summary>
-    public string CardStyle => Settings.Get("cardstyle", "glass");
+    /// <summary>2.0 起外观固定为「液态玻璃」，不再提供自定义。</summary>
+    public string CardStyle => "glass";
 
-    /// <summary>自定义颜色（仅 CardStyle == "custom" 时用），格式 #RRGGBB。</summary>
-    public string CardColorHex => Settings.Get("cardcolor", "#1B2434");
+    /// <summary>2.0 起外观固定：颜色不可调，这里只是占位值。</summary>
+    public string CardColorHex => "#ECF2FF";
 
-    /// <summary>自定义颜色的不透明度（0-100）。**所有风格都生效** —— 这就是"玻璃有多透"。</summary>
-    public int CardOpacity => Math.Clamp(Settings.Get("cardopacity", 62), 5, 100);
+    /// <summary>2.0 起外观固定：不透明度不可调。</summary>
+    public int CardOpacity => 62;
 
-    /// <summary>岛体要不要自绘背景（盖住宿主那个黑色胶囊）。</summary>
-    public bool IslandOwnBackground => Settings.Get("islandbg", true);
+    /// <summary>2.0 起岛体不再自绘背景 —— 用宿主自带的外观，胶囊颜色不可调。</summary>
+    public bool IslandOwnBackground => false;
 
-    /// <summary>当前外观算浅色吗（岛体和卡片共用一个判断）。</summary>
-    public bool AppearanceIsLight
-    {
-        get
-        {
-            switch (CardStyle)
-            {
-                case "white": return true;
-                case "dark": return false;
-                case "glass": return false;
-                case "custom":
-                    var c = ParseHexColor(CardColorHex, Windows.UI.Color.FromArgb(255, 0x1B, 0x24, 0x34));
-                    var a = CardOpacity / 100.0;
-                    var lum = (0.2126 * c.R + 0.7152 * c.G + 0.0722 * c.B) / 255.0;
-                    return lum * a + 0.04 * (1 - a) > 0.55;
-                default:
-                    return Theme.IsLight;
-            }
-        }
-    }
+    /// <summary>2.0 起外观固定：岛体与卡片的明暗一律跟着岛体主题走。</summary>
+    public bool AppearanceIsLight => Theme.IsLight;
 
-    /// <summary>当前外观的基色（岛体和卡片共用）。</summary>
-    public Windows.UI.Color AppearanceBaseColor => CardStyle switch
-    {
-        "white" => Windows.UI.Color.FromArgb(255, 255, 255, 255),
-        "dark" => Windows.UI.Color.FromArgb(255, 0x0E, 0x12, 0x1A),
-        "glass" => Windows.UI.Color.FromArgb(255, 0xEC, 0xF2, 0xFF),
-        "custom" => ParseHexColor(CardColorHex, Windows.UI.Color.FromArgb(255, 0x1B, 0x24, 0x34)),
-        _ => AppearanceIsLight
-            ? Windows.UI.Color.FromArgb(255, 255, 255, 255)
-            : Windows.UI.Color.FromArgb(255, 0xEC, 0xF2, 0xFF),
-    };
+    /// <summary>2.0 起外观固定：基色就是默认的冷色玻璃。</summary>
+    public Windows.UI.Color AppearanceBaseColor => Windows.UI.Color.FromArgb(255, 0xEC, 0xF2, 0xFF);
 
+    /// <summary>2.0 起外观不可自定义 —— 设置页的相关入口已移除，这里保留空实现。</summary>
     public void SetCardAppearance(string? style = null, string? colorHex = null, int? opacity = null)
     {
-        var changed = false;
-
-        if (!string.IsNullOrWhiteSpace(style) && !string.Equals(style, CardStyle, StringComparison.Ordinal))
-        {
-            Settings.Set("cardstyle", style);
-            changed = true;
-        }
-
-        if (!string.IsNullOrWhiteSpace(colorHex) && !string.Equals(colorHex, CardColorHex, StringComparison.OrdinalIgnoreCase))
-        {
-            Settings.Set("cardcolor", colorHex);
-            changed = true;
-        }
-
-        if (opacity is int op && op != CardOpacity)
-        {
-            Settings.Set("cardopacity", Math.Clamp(op, 0, 100));
-            changed = true;
-        }
-
-        // 外观是画上去的，不是绑定 —— 改完要主动让岛体和卡片各重刷一次
-        if (changed)
-        {
-            _view.RefreshAppearance();
-            _spotlight?.RefreshAppearance();
-        }
+        // 外观固定，什么都不做
     }
 
     /// <summary>把 "#RRGGBB" 解析成颜色；解析不了就给个中性深蓝。</summary>
@@ -463,15 +408,7 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
             _spotlight?.Apply(_snapshot);
         }));
 
-        // 外观改了要重刷配色（设置页里会主动刷一次，这里兜底别的改动路径）
-        foreach (var key in new[] { "cardstyle", "cardcolor", "cardopacity", "islandbg", "accent" })
-        {
-            Context.Register(Context.OnSettingsChanged(key, () =>
-            {
-                _view.RefreshAppearance();
-                _spotlight?.RefreshAppearance();
-            }));
-        }
+        // 2.0：外观固定，不再监听外观相关设置（自定义入口已全部移除）
 
         if (Settings.Get("enabled", true))
         {
@@ -1069,24 +1006,8 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
         }
     }
 
-    /// <summary>
-    /// 强调色（模式胶囊 / 网速曲线 / 趋势线）。空字符串 = 用默认的青蓝。
-    /// </summary>
-    public string AccentColorHex => Settings.Get("accent", "");
-
-    /// <summary>强调色；没设置就返回 null，各元素用各自默认色。</summary>
-    public Windows.UI.Color? AccentColor => string.IsNullOrWhiteSpace(AccentColorHex)
-        ? null
-        : ParseHexColor(AccentColorHex, Windows.UI.Color.FromArgb(255, 0x4C, 0xC2, 0xFF));
-
-    public void SetAccentColor(string hex)
-    {
-        if (string.Equals(hex, AccentColorHex, StringComparison.OrdinalIgnoreCase)) return;
-        Settings.Set("accent", hex ?? "");
-
-        _view.RefreshAppearance();
-        _spotlight?.RefreshAppearance();
-    }
+    /// <summary>2.0 起强调色不可自定义 —— 返回 null，各元素一律用各自的默认配色。</summary>
+    public Windows.UI.Color? AccentColor => null;
 
     /// <summary>切换某个分组里选中的节点。</summary>
     public async Task SelectNodeAsync(string group, string node)    {
@@ -1290,106 +1211,6 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
             },
         });
 
-        // ── 聚光卡外观 ──────────────────────────────────────────
-        // 卡片的底是宿主画的，插件改不了 —— 但可以整张盖一层自己的玻璃，
-        // 于是「颜色」就成了用户可选项：白卡片 / 深色 / 液态玻璃 / 完全自定义。
-        var cardStyles = new (string Label, string Value)[]
-        {
-            ("跟随岛体主题", "auto"),
-            ("液态玻璃（冷色，推荐）", "glass"),
-            ("深色", "dark"),
-            ("白色", "white"),
-            ("自定义颜色…", "custom"),
-        };
-
-        var cardStyleBox = new ComboBox { Header = "聚光卡外观", MinWidth = 300 };
-        foreach (var style in cardStyles) cardStyleBox.Items.Add(style.Label);
-
-        var styleIndex = Array.FindIndex(cardStyles, s => s.Value == CardStyle);
-        cardStyleBox.SelectedIndex = styleIndex >= 0 ? styleIndex : 1;
-
-        var cardColorPicker = new ColorPicker
-        {
-            Color = ParseHexColor(CardColorHex, Windows.UI.Color.FromArgb(255, 0x1B, 0x24, 0x34)),
-            IsAlphaEnabled = false,
-            IsHexInputVisible = true,
-            ColorSpectrumShape = ColorSpectrumShape.Box,
-            IsMoreButtonVisible = false,
-            MinWidth = 320,
-        };
-
-        var cardOpacitySlider = new Slider
-        {
-            Header = $"玻璃不透明度（{CardOpacity}%）",
-            Minimum = 5,
-            Maximum = 100,
-            Value = CardOpacity,
-            StepFrequency = 1,
-            Width = 300,
-        };
-
-        // 取色器只在「自定义颜色」时才出现；**不透明度滑块一直都在** —— 任何风格都该能调透
-        var customPanel = new StackPanel
-        {
-            Spacing = 8,
-            Visibility = CardStyle == "custom" ? Visibility.Visible : Visibility.Collapsed,
-            Children = { cardColorPicker },
-        };
-
-        cardStyleBox.SelectionChanged += (_, _) =>
-        {
-            var i = cardStyleBox.SelectedIndex;
-            if (i < 0 || i >= cardStyles.Length) return;
-
-            var value = cardStyles[i].Value;
-            customPanel.Visibility = value == "custom" ? Visibility.Visible : Visibility.Collapsed;
-            SetCardAppearance(value);
-        };
-
-        cardColorPicker.ColorChanged += (_, e) =>
-        {
-            SetCardAppearance("custom", $"#{e.NewColor.R:X2}{e.NewColor.G:X2}{e.NewColor.B:X2}");
-        };
-
-        cardOpacitySlider.ValueChanged += (_, e) =>
-        {
-            cardOpacitySlider.Header = $"玻璃不透明度（{(int)e.NewValue}%）";
-            SetCardAppearance(null, null, (int)e.NewValue);
-        };
-
-        // 岛体那个黑胶囊是宿主画的。勾上这个，插件就自己画一个圆角药丸盖上去 ——
-        // 于是岛体也能有颜色 / 透明度。
-        var islandBg = new CheckBox
-        {
-            Content = "自绘岛体背景（盖住宿主那个黑胶囊，让岛体也能用玻璃色）",
-            IsChecked = Settings.Get("islandbg", true),
-        };
-        islandBg.Checked += (_, _) => { Settings.Set("islandbg", true); _view.RefreshAppearance(); };
-        islandBg.Unchecked += (_, _) => { Settings.Set("islandbg", false); _view.RefreshAppearance(); };
-
-        panel.Children.Add(new Border
-        {
-            Style = (Style)Application.Current.Resources["SettingsCardStyle"],
-            Child = new StackPanel
-            {
-                Spacing = 10,
-                Children =
-                {
-                    cardStyleBox,
-                    new TextBlock
-                    {
-                        Text = "岛体和卡片的底色本来是宿主画的、改不了；插件自己盖了一层玻璃，" +
-                               "所以颜色和透明度都归你定。选浅色时文字会自动翻成深色。",
-                        TextWrapping = TextWrapping.Wrap,
-                        Opacity = 0.75,
-                        FontSize = 12,
-                    },
-                    customPanel,
-                    cardOpacitySlider,
-                    islandBg,
-                },
-            },
-        });
 
         // ── IP 归属地 ────────────────────────────────────────────
         // 节点名经常骗人（「自动选择」「故障转移」「香港01」），国旗按**真实出口 IP** 显示。
@@ -1455,61 +1276,6 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
                                "「自动选择」「故障转移」这类名字看不出国家，「香港01」也可能实际落在日本。\n" +
                                "查询会经过代理向第三方归属地服务发一个请求（和 Clash Verge 的「IP 信息」同一做法）；" +
                                "查不到时会退回按节点名判断。",
-                        TextWrapping = TextWrapping.Wrap,
-                        Opacity = 0.75,
-                        FontSize = 12,
-                    },
-                },
-            },
-        });
-
-        // ── 强调色：模式胶囊 / 网速曲线 / 延迟趋势线 ──────────────
-        var accentAuto = new CheckBox
-        {
-            Content = "用默认配色（不自定义强调色）",
-            IsChecked = string.IsNullOrWhiteSpace(AccentColorHex),
-        };
-
-        var accentPicker = new ColorPicker
-        {
-            Color = AccentColor ?? Windows.UI.Color.FromArgb(255, 0x4C, 0xC2, 0xFF),
-            IsAlphaEnabled = false,
-            IsHexInputVisible = true,
-            ColorSpectrumShape = ColorSpectrumShape.Box,
-            IsMoreButtonVisible = false,
-            MinWidth = 320,
-            IsEnabled = accentAuto.IsChecked != true,
-        };
-
-        accentAuto.Checked += (_, _) =>
-        {
-            accentPicker.IsEnabled = false;
-            SetAccentColor("");
-        };
-        accentAuto.Unchecked += (_, _) =>
-        {
-            accentPicker.IsEnabled = true;
-            SetAccentColor($"#{accentPicker.Color.R:X2}{accentPicker.Color.G:X2}{accentPicker.Color.B:X2}");
-        };
-        accentPicker.ColorChanged += (_, e) =>
-        {
-            if (accentAuto.IsChecked == true) return;
-            SetAccentColor($"#{e.NewColor.R:X2}{e.NewColor.G:X2}{e.NewColor.B:X2}");
-        };
-
-        panel.Children.Add(new Border
-        {
-            Style = (Style)Application.Current.Resources["SettingsCardStyle"],
-            Child = new StackPanel
-            {
-                Spacing = 10,
-                Children =
-                {
-                    accentAuto,
-                    accentPicker,
-                    new TextBlock
-                    {
-                        Text = "强调色用在：岛上的模式胶囊、网速曲线，以及卡片里的延迟趋势线。",
                         TextWrapping = TextWrapping.Wrap,
                         Opacity = 0.75,
                         FontSize = 12,
