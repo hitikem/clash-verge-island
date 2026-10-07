@@ -726,8 +726,12 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
     /// 三条路都会调它：定时自动重测、打开卡片、手动点「全部测试」。
     /// 入口必须自己防重入 —— 否则会同时跑好几轮，日志里同一秒出现好几次同样的测速，
     /// 既白费流量，数值也因为互相抢带宽而失真。
+    ///
+    /// <paramref name="showMessage"/> 只在**用户主动点**的时候才给岛上的进行中提示：
+    /// 定时那轮是后台行为，每隔几分钟就往胶囊里弹一次「正在测 4 个网站…」很烦人；
+    /// 打开卡片时也不用弹 —— 卡片里本来就在显示这些数值。
     /// </summary>
-    public async Task TestAllSitesAsync()
+    public async Task TestAllSitesAsync(bool showMessage = false)
     {
         if (Interlocked.Exchange(ref _siteTestRunning, 1) == 1) return;
 
@@ -738,13 +742,17 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
 
             _lastSiteTest = DateTimeOffset.UtcNow;
             Log.Info($"开始全网站测速：{node}");
-            Context.RunOnUI(() => Context.Island.ShowMessage(new IslandMessage
+
+            if (showMessage)
             {
-                Title = Manifest.Name,
-                Text = $"正在测 {_targets.Count} 个网站…",
-                Glyph = Manifest.IconGlyph ?? "\uE774",
-                Duration = TimeSpan.FromSeconds(2),
-            }));
+                Context.RunOnUI(() => Context.Island.ShowMessage(new IslandMessage
+                {
+                    Title = Manifest.Name,
+                    Text = $"正在测 {_targets.Count} 个网站…",
+                    Glyph = Manifest.IconGlyph ?? "\uE774",
+                    Duration = TimeSpan.FromSeconds(2),
+                }));
+            }
 
             foreach (var target in _targets)
             {

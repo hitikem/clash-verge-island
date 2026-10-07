@@ -419,7 +419,8 @@ public sealed class ClashIslandSpotlightView : UserControl
             BorderThickness = new Thickness(1),
             BorderBrush = _rowEdgeBrush,
         };
-        testAll.Click += async (_, _) => await _plugin.TestAllSitesAsync();
+        // 用户主动点的，给个「正在测」的岛体反馈；定时那轮是后台行为，安静更新
+        testAll.Click += async (_, _) => await _plugin.TestAllSitesAsync(showMessage: true);
         targetRow.Children.Add(testAll);
 
         var sort = new CheckBox
