@@ -15,11 +15,19 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
     private const int DefaultPort = 9097;
 
     /// <summary>
-    /// 默认岛体优先级。取 150 而不是插件常见的 30：
-    /// 内置音乐模块放歌时会把优先级抬到 200，定低了插件在放歌时永远看不见。
-    /// 150 的效果是「放歌时让给音乐，不放歌时自己显示」——两边都不用抢。
+    /// 默认岛体优先级。
+    ///
+    /// 曾经取 150，理由是"音乐模块放歌时会抬到 200"——**那个数字是错的**。
+    /// 查过宿主源码：<c>MediaPlugin.DefaultPriority = 100</c>，而且是**固定值**，
+    /// 它靠"播放时才注册岛上内容"占岛，不靠抬优先级。
+    /// 于是 150 比音乐还高，放歌时照样压着音乐，也压着所有其它插件
+    /// （实测档位：媒体 100 / 硬件监控 95 / 剪贴板 55 / 电池 50 / 设备 45 / 天气 40），
+    /// 社区 issue #8 投诉的正是这个。
+    ///
+    /// 现在取 50：落在"常驻插件那一档"正中，低于音乐 100 ——
+    /// 「放歌时让给音乐」才真的成立。用户想要更高的，自己在设置里滑。
     /// </summary>
-    private const int DefaultPriority = 150;
+    private const int DefaultPriority = 50;
 
     /// <summary>趋势曲线保留的采样点数（每次刷新一个点，约 2 秒一个）。</summary>
     private const int HistoryLength = 60;
@@ -1164,31 +1172,59 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
             Child = twChina,
         });
 
-        // 灵动岛优先级：多个插件 / 内置模块抢岛时，数值大的占岛，其余进展开队列。
-        // 必须能在界面上调 —— 冲突是必然会发生的（内置音乐模块放歌时会把自己抬到 200）。
-        var priorityOptions = new (string Label, int Value)[]
+        // 灵动岛优先级：滑动条，0~200，逐格 1。
+        // 用滑块而不是下拉选项 —— 档位是连续的，下拉只能挑几个预设值，想微调就没法弄了。
+        var currentPriority = Math.Clamp(Settings.Get("priority", DefaultPriority), 0, 200);
+
+        var priorityValue = new TextBlock
         {
-            ("最低 30（几乎总让位）", 30),
-            ("低 50", 50),
-            ("中 100", 100),
-            ("高 150（推荐：放歌时让给音乐）", 150),
-            ("最高 210（始终占岛，压过音乐）", 210),
+            Text = currentPriority.ToString(),
+            FontSize = 20,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextAlignment = TextAlignment.Right,
+            MinWidth = 48,
         };
 
-        var priorityBox = new ComboBox { Header = "灵动岛优先级", MinWidth = 300 };
-        foreach (var option in priorityOptions) priorityBox.Items.Add(option.Label);
-
-        var currentPriority = Settings.Get("priority", DefaultPriority);
-        var priorityIndex = Array.FindIndex(priorityOptions, o => o.Value == currentPriority);
-        priorityBox.SelectedIndex = priorityIndex >= 0 ? priorityIndex : 3;
-        priorityBox.SelectionChanged += (_, _) =>
+        var prioritySlider = new Slider
         {
-            var i = priorityBox.SelectedIndex;
-            if (i < 0 || i >= priorityOptions.Length) return;
+            Header = "灵动岛优先级",
+            Minimum = 0,
+            Maximum = 200,
+            StepFrequency = 1,      // 个位数级：每格 1，能滑到任何一个整数
+            TickFrequency = 20,     // 刻度线每 20 一条，只做视觉参考
+            SmallChange = 1,
+            LargeChange = 10,
+            Value = currentPriority,
+        };
 
-            var value = priorityOptions[i].Value;
+        // 注意顺序：Value 先赋好，再挂事件 —— 否则初始化那一下会被当成用户改动。
+        //
+        // 写设置**只在操作结束时做**：拖动过程中每一格都写，会让宿主反复重建岛上内容
+        // （优先级是注册时交给宿主的，改了必须重建），结果是拖动时岛体一直闪、还卡。
+        // 所以标签实时跟手，设置等松手 / 失焦 / 键盘操作结束再提交。
+        void CommitPriority()
+        {
+            var value = (int)Math.Round(prioritySlider.Value);
             if (Settings.Get("priority", DefaultPriority) != value) Settings.Set("priority", value);
+        }
+
+        prioritySlider.ValueChanged += (_, e) =>
+        {
+            priorityValue.Text = ((int)Math.Round(e.NewValue)).ToString();
         };
+
+        prioritySlider.PointerReleased += (_, _) => CommitPriority();
+        prioritySlider.PointerCaptureLost += (_, _) => CommitPriority();
+        prioritySlider.LostFocus += (_, _) => CommitPriority();
+
+        var priorityGrid = new Grid();
+        priorityGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        priorityGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Grid.SetColumn(prioritySlider, 0);
+        Grid.SetColumn(priorityValue, 1);
+        priorityGrid.Children.Add(prioritySlider);
+        priorityGrid.Children.Add(priorityValue);
 
         panel.Children.Add(new Border
         {
@@ -1198,11 +1234,12 @@ public sealed class ClashVergeIslandPlugin : IslandPluginBase
                 Spacing = 6,
                 Children =
                 {
-                    priorityBox,
+                    priorityGrid,
                     new TextBlock
                     {
-                        Text = "岛体同一时刻只显示优先级最高的那个内容，其它的在「悬停展开」后的队列里。\n" +
-                               "内置音乐模块在放歌时会把优先级抬到 200：选 150 就是「放歌时让给音乐，不放歌时显示本插件」。",
+                        Text = "岛体同一时刻只显示优先级最高的那个内容，其它的在「悬停展开」后的队列里（翻页都能看到）。\n" +
+                               "参考档位：音乐 100（播放时占岛）· 硬件监控 95 · 剪贴板 55 · 电池 50 · 设备 45 · 天气 40。\n" +
+                               "默认 50 —— 放歌时让给音乐，平时高于大部分常驻插件。想让它更靠前就往右滑。",
                         TextWrapping = TextWrapping.Wrap,
                         Opacity = 0.7,
                         FontSize = 12,
